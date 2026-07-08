@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class TourSearchRequest(BaseModel):
+    auth_token: str | None = Field(default=None, description="Токен прослойки для Suvvy, если нельзя передать Authorization header")
     departure_city: str = Field(..., description="Город вылета")
     country: str = Field(..., description="Страна / направление")
     resort: str | None = Field(default=None, description="Курорт, если известен")

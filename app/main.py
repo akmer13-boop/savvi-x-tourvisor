@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
@@ -27,16 +27,26 @@ app.add_middleware(
 )
 
 
-def verify_suvvy_token(authorization: str | None = Header(default=None)) -> None:
+def verify_suvvy_token(authorization: str | None, body_token: str | None = None) -> None:
+    """Validate request from Suvvy.
+
+    Preferred: Authorization header = Bearer <SUVVY_WEBHOOK_TOKEN>.
+    Fallback for Swagger/Suvvy UI issues: auth_token field in JSON body = <SUVVY_WEBHOOK_TOKEN>.
+    """
     if not settings.suvvy_webhook_token:
         return
 
-    expected = f"Bearer {settings.suvvy_webhook_token}"
-    if authorization != expected:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization token",
-        )
+    expected_header = f"Bearer {settings.suvvy_webhook_token}"
+    if authorization == expected_header:
+        return
+
+    if body_token and body_token.strip() == settings.suvvy_webhook_token:
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid authorization token",
+    )
 
 
 
@@ -57,8 +67,9 @@ async def health() -> dict[str, str]:
 @app.post("/api/suvvy/tour-search", response_model=BotResponse)
 async def suvvy_tour_search(
     request: TourSearchRequest,
-    _: None = Depends(verify_suvvy_token),
+    authorization: str | None = Header(default=None),
 ) -> BotResponse:
+    verify_suvvy_token(authorization, request.auth_token)
     try:
         client = TourvisorClient()
         search_id, tours = await client.search_tours(request)
