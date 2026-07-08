@@ -60,7 +60,39 @@ class TourOption(BaseModel):
     room: str | None = None
     link: str | None = None
     rating: float | None = None
+    hotel_id: int | None = None
+    tour_id: str | None = None
+    room_id: int | None = None
+    tour_picture: str | None = None
+    room_images: list[str] = Field(default_factory=list)
+    room_description: str | None = None
+    room_area: int | None = None
+    room_sleeping_places: str | None = None
+    room_view_description: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "country": self.country,
+            "resort": self.resort,
+            "hotel": self.hotel,
+            "stars": self.stars,
+            "meal": self.meal,
+            "departure_city": self.departure_city,
+            "fly_date": self.fly_date,
+            "nights": self.nights,
+            "adults": self.adults,
+            "children": self.children,
+            "price": self.price,
+            "currency": self.currency,
+            "operator": self.operator,
+            "room": self.room,
+            "room_id": self.room_id,
+            "room_images": self.room_images,
+            "tour_picture": self.tour_picture,
+            "link": self.link,
+            "rating": self.rating,
+        }
 
 
 class BotResponse(BaseModel):
@@ -69,3 +101,4 @@ class BotResponse(BaseModel):
     client_text: str
     tours_count: int = 0
     search_id: str | None = None
+    tours: list[dict[str, Any]] = Field(default_factory=list)

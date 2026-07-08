@@ -78,6 +78,47 @@ class TourvisorClient:
         tours = self._parse_search_results(results, request)
         return search_id, tours
 
+    async def enrich_tours_with_room_details(self, tours: list[TourOption]) -> list[TourOption]:
+        """Attach room details/images by roomId.
+
+        Tourvisor docs: GET /search/api/v1/rooms accepts room IDs from search results
+        and returns room descriptions plus images. This API section may be paid separately;
+        if it is unavailable, we keep tours without images instead of breaking search.
+        """
+        if settings.mock_tourvisor or not settings.tourvisor_enable_room_images:
+            return tours
+
+        room_ids = sorted({tour.room_id for tour in tours if tour.room_id})
+        if not room_ids:
+            return tours
+
+        try:
+            async with httpx.AsyncClient(timeout=settings.tourvisor_timeout_seconds) as client:
+                rooms = await self._get(client, "/search/api/v1/rooms", params={"ids": room_ids[:30]})
+        except Exception:
+            logger.exception("Unable to enrich tours with room details/images")
+            return tours
+
+        if not isinstance(rooms, list):
+            return tours
+
+        room_by_id = {_to_int(room.get("id")): room for room in rooms if isinstance(room, dict)}
+        image_limit = max(settings.tourvisor_room_images_limit, 0)
+        for tour in tours:
+            room = room_by_id.get(tour.room_id)
+            if not room:
+                continue
+            images = room.get("images") or []
+            if isinstance(images, list):
+                tour.room_images = [str(url) for url in images if url][:image_limit]
+            tour.room_description = room.get("description") or room.get("comment")
+            tour.room_area = _to_int(room.get("area"))
+            tour.room_sleeping_places = room.get("sleepingPlaces")
+            tour.room_view_description = room.get("viewDescription")
+            if not tour.room and room.get("name"):
+                tour.room = str(room.get("name"))
+        return tours
+
     def _validate_config(self) -> None:
         if not self.jwt:
             raise RuntimeError("TOURVISOR_JWT is not configured")
@@ -255,6 +296,10 @@ class TourvisorClient:
             room=tour.get("roomType") or tour.get("name") or tour.get("placement"),
             link=hotel.get("hotelDescriptionLink") or settings.tourvisor_public_search_url or None,
             rating=_to_float(hotel.get("rating")),
+            hotel_id=_to_int(hotel.get("id")),
+            tour_id=str(tour.get("id")) if tour.get("id") is not None else None,
+            room_id=_to_int(tour.get("roomId")),
+            tour_picture=tour.get("picture") or hotel.get("picture"),
             raw={"hotel": hotel, "tour": tour},
         )
 

@@ -74,6 +74,7 @@ async def suvvy_tour_search(
         client = TourvisorClient()
         search_id, tours = await client.search_tours(request)
         selected = select_best_tours(tours, request, limit=5)
+        selected = await client.enrich_tours_with_room_details(selected)
         client_text = format_tours_for_client(selected, request)
 
         return BotResponse(
@@ -82,6 +83,7 @@ async def suvvy_tour_search(
             client_text=client_text,
             tours_count=len(selected),
             search_id=search_id,
+            tours=[tour.public_dict() for tour in selected],
         )
     except HTTPException:
         raise

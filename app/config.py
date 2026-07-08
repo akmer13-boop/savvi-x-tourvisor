@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     tourvisor_poll_attempts: int = 4
     tourvisor_poll_interval_seconds: float = 3.0
     tourvisor_results_limit: int = 25
+    tourvisor_enable_room_images: bool = True
+    tourvisor_room_images_limit: int = 2
 
     # Backward-compatible names from the first MVP build.
     tourvisor_api_key: str = ""
