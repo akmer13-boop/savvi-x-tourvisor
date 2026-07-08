@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.formatting import format_tours_for_client
+from app.media import cards_from_tours, image_assets_from_tours, message_blocks_from_tours, normalize_tour_media
 from app.models import BotResponse, TourSearchRequest
 from app.ranking import select_best_tours
 from app.tourvisor_client import TourvisorClient, UserInputError
@@ -14,8 +15,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.1.0",
-    description="MVP service that receives tour parameters from Suvvy and returns 3–5 preliminary Tourvisor options.",
+    version="0.2.0",
+    description=(
+        "Service that receives tour parameters from Suvvy, searches Tourvisor, "
+        "and returns clean text plus structured cards/images for user-friendly delivery."
+    ),
 )
 
 app.add_middleware(
@@ -24,6 +28,14 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
+)
+
+
+IMAGE_DELIVERY_NOTE = (
+    "Webhook-действие Suvvy получает JSON-результат для бота. "
+    "Ссылки на фото не вставлены в client_text, чтобы клиент не видел сырые URL. "
+    "Для вывода фото как картинок используйте массив images/messages и настройку канала/действия, "
+    "которое умеет отправлять image attachments."
 )
 
 
@@ -49,15 +61,15 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
     )
 
 
-
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok"}
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.0"}
 
 
 @app.get("/ping")
 async def ping() -> dict[str, str]:
     return {"pong": "ok"}
+
 
 @app.get("/health")
 async def health() -> dict[str, str]:
@@ -75,7 +87,14 @@ async def suvvy_tour_search(
         search_id, tours = await client.search_tours(request)
         selected = select_best_tours(tours, request, limit=5)
         selected = await client.enrich_tours_with_room_details(selected)
-        client_text = format_tours_for_client(selected, request)
+        for tour in selected:
+            normalize_tour_media(tour)
+
+        include_image_links = request.image_mode == "links_in_text"
+        client_text = format_tours_for_client(selected, request, include_image_links=include_image_links)
+        images = [] if request.image_mode == "none" else image_assets_from_tours(selected, limit_per_tour=1)
+        cards = cards_from_tours(selected)
+        messages = [] if request.image_mode == "none" else message_blocks_from_tours(client_text, selected)
 
         return BotResponse(
             status="ok",
@@ -84,6 +103,10 @@ async def suvvy_tour_search(
             tours_count=len(selected),
             search_id=search_id,
             tours=[tour.public_dict() for tour in selected],
+            cards=cards,
+            images=images,
+            messages=messages,
+            image_delivery_note=IMAGE_DELIVERY_NOTE if images else None,
         )
     except HTTPException:
         raise
@@ -94,8 +117,9 @@ async def suvvy_tour_search(
             client_text=str(exc),
             tours_count=0,
             search_id=None,
+            image_delivery_note=None,
         )
-    except Exception as exc:  # noqa: BLE001 - we return safe text to Suvvy instead of raw stack trace
+    except Exception:  # noqa: BLE001 - we return safe text to Suvvy instead of raw stack trace
         logger.exception("Tour search failed")
         return BotResponse(
             status="error",
@@ -106,4 +130,5 @@ async def suvvy_tour_search(
             ),
             tours_count=0,
             search_id=None,
+            image_delivery_note=None,
         )

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -21,7 +21,12 @@ class TourSearchRequest(BaseModel):
     beach_preferences: str | None = None
     client_name: str | None = None
     client_phone: str | None = None
-    chat_id: str | None = None
+    chat_id: str | None = Field(default=None, description="ID диалога в Suvvy/канале, если доступен")
+    source: str | None = Field(default=None, description="Источник диалога/лида, если доступен")
+    image_mode: Literal["structured", "links_in_text", "none"] = Field(
+        default="structured",
+        description="Как возвращать фото: structured — отдельно в JSON; links_in_text — ссылками в тексте; none — без фото",
+    )
 
     @field_validator("departure_city", "country")
     @classmethod
@@ -102,3 +107,7 @@ class BotResponse(BaseModel):
     tours_count: int = 0
     search_id: str | None = None
     tours: list[dict[str, Any]] = Field(default_factory=list)
+    cards: list[dict[str, Any]] = Field(default_factory=list, description="Карточки туров для маппинга в Suvvy")
+    images: list[dict[str, Any]] = Field(default_factory=list, description="Фото отдельным массивом; URL уже полные https")
+    messages: list[dict[str, Any]] = Field(default_factory=list, description="Упорядоченные блоки text/image для интеграции")
+    image_delivery_note: str | None = Field(default=None, description="Подсказка, как корректно выводить изображения в Suvvy")

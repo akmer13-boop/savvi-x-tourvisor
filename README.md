@@ -14,7 +14,18 @@ FastAPI-сервис-прослойка для интеграции Suvvy с Tou
    - забирает результаты поиска;
    - выбирает 3–5 вариантов;
    - при наличии `roomId` запрашивает `/search/api/v1/rooms` и подтягивает фото/описания номеров.
-4. Возвращает готовый текст в `client_text` и структурированный массив `tours`.
+4. Возвращает:
+   - `client_text` — чистый текст без сырых ссылок на фото;
+   - `tours` — структурированные данные по турам;
+   - `cards` — компактные карточки;
+   - `images` — отдельный массив фото с полными `https://` URL;
+   - `messages` — упорядоченные блоки `text` / `image` для дальнейшего маппинга.
+
+## Почему фото вынесены из client_text
+
+Suvvy webhook-действие возвращает результат боту. По документации вебхуков результат можно вернуть как ответ/настраиваемые переменные, но универсального формата “покажи attachment из webhook response” в этом действии не описано. Поэтому в `client_text` не вставляем ссылки на фото, чтобы клиент не видел сырой URL. Фото возвращаем отдельно в `images` и `messages`.
+
+Если канал/сценарий Suvvy умеет отправлять изображения из переменных — используйте `images[0].url`, `images[1].url` и т.д. Если нет — нужны отдельные шаги/канальный API, который умеет отправлять image attachments.
 
 ## Endpoints
 
@@ -40,10 +51,6 @@ TOURVISOR_ROOM_IMAGES_LIMIT=2
 LOG_LEVEL=INFO
 ```
 
-## Фото номеров
-
-Tourvisor отдаёт фото номеров через метод `GET /search/api/v1/rooms` по `roomId` из результатов поиска. Если раздел API описания номеров не подключён у Tourvisor, сервис не падает: варианты туров вернутся без `room_images`.
-
 ## Пример POST-запроса
 
 ```json
@@ -61,27 +68,47 @@ Tourvisor отдаёт фото номеров через метод `GET /searc
   "children_ages": [7],
   "budget": 250000,
   "meal": "all inclusive",
-  "hotel_stars": 5
+  "hotel_stars": 5,
+  "image_mode": "structured"
 }
 ```
 
-## Ответ
+## image_mode
+
+- `structured` — по умолчанию. Текст чистый, фото отдельно в `images/messages`.
+- `links_in_text` — добавляет ссылки на фото в `client_text`. Удобно для отладки, хуже для клиента.
+- `none` — не возвращает фото в `images/messages`.
+
+## Пример ответа
 
 ```json
 {
   "status": "ok",
   "found": true,
-  "client_text": "...",
+  "client_text": "Нашёл предварительные варианты...",
   "tours_count": 5,
   "search_id": "...",
-  "tours": [
+  "images": [
     {
-      "hotel": "...",
-      "room": "...",
-      "room_id": 123,
-      "room_images": ["https://..."],
-      "price": 250000
+      "tour_index": 1,
+      "url": "https://static.tourvisor.ru/hotel_pics/rooms/...jpg",
+      "caption": "1. HOTEL NAME — standard room",
+      "file_name": "tour_1_hotel_name.jpg",
+      "file_type": "image",
+      "mime_type": "image/jpeg"
     }
+  ],
+  "cards": [
+    {
+      "index": 1,
+      "title": "HOTEL NAME 5★",
+      "image_url": "https://static.tourvisor.ru/hotel_pics/rooms/...jpg",
+      "price": 202370
+    }
+  ],
+  "messages": [
+    {"type": "text", "text": "Нашёл предварительные варианты..."},
+    {"type": "image", "url": "https://static.tourvisor.ru/...jpg", "caption": "1. HOTEL NAME — standard room"}
   ]
 }
 ```
@@ -91,3 +118,4 @@ Tourvisor отдаёт фото номеров через метод `GET /searc
 - Сервис не подтверждает бронирование.
 - Цены и наличие нужно проверять менеджером перед продажей.
 - Если есть дети, Tourvisor требует возраст каждого ребёнка. Передавайте `children_ages`.
+- Если у Tourvisor не подключён API описаний/номеров, туры вернутся без `room_images`, сервис не падает.

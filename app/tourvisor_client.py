@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.media import absolute_url, normalize_tour_media
 from app.models import TourOption, TourSearchRequest
 
 logger = logging.getLogger(__name__)
@@ -110,7 +111,7 @@ class TourvisorClient:
                 continue
             images = room.get("images") or []
             if isinstance(images, list):
-                tour.room_images = [str(url) for url in images if url][:image_limit]
+                tour.room_images = [url for url in (absolute_url(str(url)) for url in images if url) if url][:image_limit]
             tour.room_description = room.get("description") or room.get("comment")
             tour.room_area = _to_int(room.get("area"))
             tour.room_sleeping_places = room.get("sleepingPlaces")
@@ -268,7 +269,9 @@ class TourvisorClient:
                     continue
                 if hotel_id:
                     seen_hotels.add(hotel_id)
-                tours.append(self._parse_tour_option(hotel, tour, request))
+                option = self._parse_tour_option(hotel, tour, request)
+                normalize_tour_media(option)
+                tours.append(option)
 
         return tours
 
@@ -294,12 +297,12 @@ class TourvisorClient:
             currency=str(tour.get("currency") or hotel.get("currency") or settings.tourvisor_currency),
             operator=_operator_text(operator),
             room=tour.get("roomType") or tour.get("name") or tour.get("placement"),
-            link=hotel.get("hotelDescriptionLink") or settings.tourvisor_public_search_url or None,
+            link=absolute_url(hotel.get("hotelDescriptionLink") or settings.tourvisor_public_search_url or None),
             rating=_to_float(hotel.get("rating")),
             hotel_id=_to_int(hotel.get("id")),
             tour_id=str(tour.get("id")) if tour.get("id") is not None else None,
             room_id=_to_int(tour.get("roomId")),
-            tour_picture=tour.get("picture") or hotel.get("picture"),
+            tour_picture=absolute_url(tour.get("picture") or hotel.get("picture")),
             raw={"hotel": hotel, "tour": tour},
         )
 
