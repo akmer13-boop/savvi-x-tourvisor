@@ -39,6 +39,16 @@ def verify_suvvy_token(authorization: str | None = Header(default=None)) -> None
         )
 
 
+
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok"}
+
+
+@app.get("/ping")
+async def ping() -> dict[str, str]:
+    return {"pong": "ok"}
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
