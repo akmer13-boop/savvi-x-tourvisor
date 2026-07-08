@@ -1,3 +1,7 @@
+import asyncio
+import logging
+import re
+import unicodedata
 import uuid
 from typing import Any
 
@@ -6,100 +10,253 @@ import httpx
 from app.config import settings
 from app.models import TourOption, TourSearchRequest
 
+logger = logging.getLogger(__name__)
+
+
+class UserInputError(ValueError):
+    """The request is missing data required for Tourvisor search."""
+
 
 class TourvisorClient:
-    """
-    Adapter for Tourvisor DDAPI.
+    """Client for Tourvisor Search API.
 
-    Public Tourvisor pages confirm the availability of DDAPI/search API, but the exact
-    search method, parameter names and dictionaries are usually issued with access.
-    Therefore this MVP has MOCK mode plus a single place where real mapping is added.
+    Flow according to Tourvisor docs:
+    1. Resolve names to dictionary IDs: departures, countries, regions, meals.
+    2. Start async tour search: GET /search/api/v1/tours/search -> searchId.
+    3. Poll status briefly.
+    4. Read current results: GET /search/api/v1/tours/search/{searchId}.
     """
+
+    def __init__(self) -> None:
+        self.base_url = settings.tourvisor_api_base_url.rstrip("/")
+        self.jwt = settings.effective_tourvisor_jwt
+        self.headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.jwt}",
+        }
 
     async def search_tours(self, request: TourSearchRequest) -> tuple[str, list[TourOption]]:
-        search_id = str(uuid.uuid4())
         if settings.mock_tourvisor:
-            return search_id, self._mock_tours(request)
+            return str(uuid.uuid4()), self._mock_tours(request)
 
-        if not settings.tourvisor_search_url or not settings.tourvisor_api_key:
-            raise RuntimeError("Tourvisor API is not configured")
-
-        payload = self._build_tourvisor_payload(request)
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            # Change after receiving exact Tourvisor auth requirements.
-            "Authorization": f"Bearer {settings.tourvisor_api_key}",
-        }
+        self._validate_config()
+        self._validate_request(request)
 
         async with httpx.AsyncClient(timeout=settings.tourvisor_timeout_seconds) as client:
-            response = await client.post(settings.tourvisor_search_url, json=payload, headers=headers)
+            departure = await self._resolve_departure(client, request.departure_city)
+            country = await self._resolve_country(client, request.country, departure["id"])
+            region_id = None
+            if request.resort:
+                region = await self._resolve_region(client, request.resort, country["id"])
+                region_id = region["id"] if region else None
+
+            meal_id = None
+            if request.meal:
+                meal = await self._resolve_meal(client, request.meal)
+                meal_id = meal["id"] if meal else None
+
+            search_params = self._build_search_params(
+                request=request,
+                departure_id=departure["id"],
+                country_id=country["id"],
+                region_id=region_id,
+                meal_id=meal_id,
+            )
+
+            search_response = await self._get(client, "/search/api/v1/tours/search", params=search_params)
+            search_id = str(search_response.get("searchId") or "")
+            if not search_id:
+                raise RuntimeError(f"Tourvisor did not return searchId: {search_response}")
+
+            await self._wait_for_results(client, search_id)
+            results = await self._get(
+                client,
+                f"/search/api/v1/tours/search/{search_id}",
+                params={"limit": settings.tourvisor_results_limit},
+            )
+
+        tours = self._parse_search_results(results, request)
+        return search_id, tours
+
+    def _validate_config(self) -> None:
+        if not self.jwt:
+            raise RuntimeError("TOURVISOR_JWT is not configured")
+        if not self.base_url:
+            raise RuntimeError("TOURVISOR_API_BASE_URL is not configured")
+
+    def _validate_request(self, request: TourSearchRequest) -> None:
+        missing: list[str] = []
+        if not request.date_from:
+            missing.append("дату начала вылета")
+        if not request.date_to:
+            missing.append("дату окончания диапазона")
+        if not request.nights_from:
+            missing.append("количество ночей от")
+        if not request.nights_to:
+            missing.append("количество ночей до")
+        if request.children and len(request.children_ages) < request.children:
+            missing.append("возраст каждого ребёнка")
+
+        if missing:
+            raise UserInputError("Для поиска нужно уточнить: " + ", ".join(missing) + ".")
+
+        if request.nights_from and request.nights_to and request.nights_to - request.nights_from > 10:
+            raise UserInputError("Диапазон ночей в Tourvisor должен быть не больше 10. Уточните более узкий диапазон.")
+
+    async def _get(self, client: httpx.AsyncClient, path: str, params: dict[str, Any] | None = None) -> Any:
+        url = f"{self.base_url}{path}"
+        response = await client.get(url, params=self._clean_params(params or {}), headers=self.headers)
+        try:
             response.raise_for_status()
-            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:1000]
+            logger.error("Tourvisor API error %s for %s: %s", exc.response.status_code, path, body)
+            raise RuntimeError(f"Tourvisor API error {exc.response.status_code}") from exc
+        return response.json()
 
-        return search_id, self._parse_tourvisor_response(data)
+    @staticmethod
+    def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in params.items() if value not in (None, "", [])}
 
-    def _build_tourvisor_payload(self, request: TourSearchRequest) -> dict[str, Any]:
-        """
-        Map Suvvy request fields to Tourvisor API fields.
-        Replace names/IDs after receiving official Tourvisor DDAPI docs.
-        """
-        return {
-            "departure": request.departure_city,
-            "country": request.country,
-            "resort": request.resort,
-            "date_from": request.date_from,
-            "date_to": request.date_to,
-            "nights_from": request.nights_from,
-            "nights_to": request.nights_to,
+    async def _resolve_departure(self, client: httpx.AsyncClient, name: str) -> dict[str, Any]:
+        items = await self._get(client, "/search/api/v1/departures")
+        found = _find_by_name(items, name)
+        if not found:
+            raise UserInputError(f"Не нашёл город вылета «{name}» в справочнике Tourvisor. Уточните город вылета.")
+        return found
+
+    async def _resolve_country(self, client: httpx.AsyncClient, name: str, departure_id: int) -> dict[str, Any]:
+        items = await self._get(
+            client,
+            "/search/api/v1/countries",
+            params={"departureId": departure_id, "onlyCharter": False, "onlyDirect": False},
+        )
+        found = _find_by_name(items, name)
+        if not found:
+            raise UserInputError(f"Не нашёл направление «{name}» для выбранного города вылета. Уточните страну.")
+        return found
+
+    async def _resolve_region(self, client: httpx.AsyncClient, name: str, country_id: int) -> dict[str, Any] | None:
+        items = await self._get(client, "/search/api/v1/regions", params={"countryId": country_id})
+        found = _find_by_name(items, name)
+        if not found:
+            logger.info("Region not found in Tourvisor dictionary: %s", name)
+        return found
+
+    async def _resolve_meal(self, client: httpx.AsyncClient, name: str) -> dict[str, Any] | None:
+        items = await self._get(client, "/search/api/v1/meals")
+        found = _find_meal(items, name)
+        if not found:
+            logger.info("Meal not found in Tourvisor dictionary: %s", name)
+        return found
+
+    def _build_search_params(
+        self,
+        request: TourSearchRequest,
+        departure_id: int,
+        country_id: int,
+        region_id: int | None,
+        meal_id: int | None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "departureId": departure_id,
+            "countryId": country_id,
+            "dateFrom": request.date_from,
+            "dateTo": request.date_to,
+            "nightsFrom": request.nights_from,
+            "nightsTo": request.nights_to,
             "adults": request.adults,
-            "children": request.children,
-            "children_ages": request.children_ages,
-            "budget": request.budget,
-            "meal": request.meal,
-            "stars": request.hotel_stars,
+            "currency": settings.tourvisor_currency,
+            "onlyCharter": False,
+            "onlyDirect": False,
+            "priceTo": request.budget,
+            "hotelCategory": request.hotel_stars,
+            "meal": meal_id,
         }
 
-    def _parse_tourvisor_response(self, data: dict[str, Any]) -> list[TourOption]:
-        """
-        Flexible parser for first integration tests.
-        Adjust this to Tourvisor's real response schema after docs/access are issued.
-        """
-        candidates: Any = data
-        for key in ("tours", "items", "results", "data"):
-            if isinstance(candidates, dict) and key in candidates:
-                candidates = candidates[key]
+        if request.children_ages:
+            params["childs"] = request.children_ages[:3]
+        if region_id:
+            params["regionIds"] = [region_id]
+        return params
+
+    async def _wait_for_results(self, client: httpx.AsyncClient, search_id: str) -> None:
+        attempts = max(settings.tourvisor_poll_attempts, 1)
+        interval = max(settings.tourvisor_poll_interval_seconds, 0)
+        for attempt in range(attempts):
+            if interval:
+                await asyncio.sleep(interval)
+            try:
+                status_data = await self._get(
+                    client,
+                    f"/search/api/v1/tours/search/{search_id}/status",
+                    params={"operatorStatus": False},
+                )
+            except Exception:  # noqa: BLE001 - results endpoint may still have partial data
+                logger.exception("Unable to read Tourvisor search status")
+                continue
+
+            progress = int(status_data.get("progress") or 0)
+            status = str(status_data.get("status") or "").lower()
+            logger.info("Tourvisor search %s status=%s progress=%s attempt=%s", search_id, status, progress, attempt + 1)
+            if progress >= 100 or status in {"done", "complete", "completed", "finished", "finish"}:
                 break
 
-        if not isinstance(candidates, list):
+    def _parse_search_results(self, data: Any, request: TourSearchRequest) -> list[TourOption]:
+        if not isinstance(data, list):
+            logger.warning("Unexpected Tourvisor results format: %s", type(data).__name__)
             return []
 
         tours: list[TourOption] = []
-        for item in candidates:
-            if not isinstance(item, dict):
+        seen_hotels: set[int] = set()
+
+        for hotel in data:
+            if not isinstance(hotel, dict):
                 continue
-            tours.append(
-                TourOption(
-                    country=str(item.get("country") or item.get("countryName") or ""),
-                    resort=item.get("resort") or item.get("region") or item.get("resortName"),
-                    hotel=str(item.get("hotel") or item.get("hotelName") or "Отель"),
-                    stars=_to_int(item.get("stars") or item.get("hotelStars")),
-                    meal=item.get("meal") or item.get("mealName"),
-                    departure_city=item.get("departure") or item.get("departureCity"),
-                    fly_date=item.get("flydate") or item.get("flyDate") or item.get("date"),
-                    nights=_to_int(item.get("nights")),
-                    adults=_to_int(item.get("adults")),
-                    children=_to_int(item.get("children")),
-                    price=_to_int(item.get("price") or item.get("totalPrice")),
-                    currency=item.get("currency") or "RUB",
-                    operator=item.get("operator") or item.get("operatorName"),
-                    room=item.get("room") or item.get("roomName"),
-                    link=item.get("link") or item.get("url") or item.get("operatorlink"),
-                    rating=_to_float(item.get("rating")),
-                    raw=item,
-                )
-            )
+            hotel_tours = hotel.get("tours") or []
+            if not isinstance(hotel_tours, list):
+                continue
+
+            # For chatbot output we usually need one best/cheapest tour per hotel.
+            hotel_tours = sorted(hotel_tours, key=lambda item: _to_int(item.get("price")) or 10**12)
+            for tour in hotel_tours[:1]:
+                if not isinstance(tour, dict):
+                    continue
+                hotel_id = _to_int(hotel.get("id"))
+                if hotel_id and hotel_id in seen_hotels:
+                    continue
+                if hotel_id:
+                    seen_hotels.add(hotel_id)
+                tours.append(self._parse_tour_option(hotel, tour, request))
+
         return tours
+
+    def _parse_tour_option(self, hotel: dict[str, Any], tour: dict[str, Any], request: TourSearchRequest) -> TourOption:
+        country = _nested_name(hotel.get("country")) or request.country
+        region = _nested_name(hotel.get("region")) or request.resort
+        sub_region = _nested_name(hotel.get("subRegion"))
+        meal = tour.get("meal") or {}
+        operator = tour.get("operator") or {}
+
+        return TourOption(
+            country=country,
+            resort=sub_region or region,
+            hotel=str(hotel.get("name") or "Отель"),
+            stars=_to_int(hotel.get("category")),
+            meal=_meal_text(meal),
+            departure_city=request.departure_city,
+            fly_date=tour.get("date"),
+            nights=_to_int(tour.get("nights")),
+            adults=_to_int(tour.get("adults")),
+            children=_to_int(tour.get("childs")),
+            price=_to_int(tour.get("price") or hotel.get("price")),
+            currency=str(tour.get("currency") or hotel.get("currency") or settings.tourvisor_currency),
+            operator=_operator_text(operator),
+            room=tour.get("roomType") or tour.get("name") or tour.get("placement"),
+            link=hotel.get("hotelDescriptionLink") or settings.tourvisor_public_search_url or None,
+            rating=_to_float(hotel.get("rating")),
+            raw={"hotel": hotel, "tour": tour},
+        )
 
     def _mock_tours(self, request: TourSearchRequest) -> list[TourOption]:
         country = request.country
@@ -162,6 +319,79 @@ class TourvisorClient:
                 link=settings.tourvisor_public_search_url or None,
             ),
         ]
+
+
+def _normalize(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("ё", "е")
+    text = unicodedata.normalize("NFKD", text)
+    text = re.sub(r"[^a-zа-я0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _find_by_name(items: Any, target: str) -> dict[str, Any] | None:
+    if not isinstance(items, list):
+        return None
+    target_norm = _normalize(target)
+    if not target_norm:
+        return None
+
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        names = [item.get("name"), item.get("russianName"), item.get("fullName"), item.get("fullRussianName")]
+        norms = [_normalize(name) for name in names if name]
+        if target_norm in norms:
+            return item
+        for norm in norms:
+            if not norm:
+                continue
+            if target_norm in norm or norm in target_norm:
+                candidates.append((abs(len(norm) - len(target_norm)), item))
+
+    if candidates:
+        return sorted(candidates, key=lambda pair: pair[0])[0][1]
+    return None
+
+
+def _find_meal(items: Any, target: str) -> dict[str, Any] | None:
+    target_norm = _normalize(target)
+    synonym_map = {
+        "all inclusive": "все включено",
+        "ultra all inclusive": "ультра все включено",
+        "ai": "все включено",
+        "uai": "ультра все включено",
+        "завтрак": "завтрак",
+        "завтраки": "завтрак",
+        "полупансион": "полупансион",
+        "пансион": "пансион",
+    }
+    target_norm = _normalize(synonym_map.get(target_norm, target_norm))
+    return _find_by_name(items, target_norm)
+
+
+def _nested_name(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("name") or value.get("russianName") or value.get("fullRussianName")
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _meal_text(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("fullRussianName") or value.get("russianName") or value.get("fullName") or value.get("name")
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _operator_text(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("russianName") or value.get("fullName") or value.get("name")
+    if isinstance(value, str):
+        return value
+    return None
 
 
 def _to_int(value: Any) -> int | None:

@@ -7,7 +7,7 @@ from app.config import settings
 from app.formatting import format_tours_for_client
 from app.models import BotResponse, TourSearchRequest
 from app.ranking import select_best_tours
-from app.tourvisor_client import TourvisorClient
+from app.tourvisor_client import TourvisorClient, UserInputError
 
 logging.basicConfig(level=settings.log_level)
 logger = logging.getLogger(__name__)
@@ -64,6 +64,14 @@ async def suvvy_tour_search(
         )
     except HTTPException:
         raise
+    except UserInputError as exc:
+        return BotResponse(
+            status="ok",
+            found=False,
+            client_text=str(exc),
+            tours_count=0,
+            search_id=None,
+        )
     except Exception as exc:  # noqa: BLE001 - we return safe text to Suvvy instead of raw stack trace
         logger.exception("Tour search failed")
         return BotResponse(
