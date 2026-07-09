@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.formatting import format_tours_for_client
 from app.media import cards_from_tours, image_assets_from_tours, message_blocks_from_tours, normalize_tour_media
-from app.models import BotResponse, TourSearchRequest
+from app.models import BotResponse, ShortBotResponse, TourSearchRequest
 from app.ranking import select_best_tours
 from app.tourvisor_client import TourvisorClient, UserInputError
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.2.1",
+    version="0.2.2",
     description=(
         "Service that receives tour parameters from Suvvy, searches Tourvisor, "
         "and returns clean text plus structured cards/images for user-friendly delivery."
@@ -102,7 +102,7 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.1"}
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.2"}
 
 
 @app.get("/ping")
@@ -214,42 +214,87 @@ async def authenticated_tour_search(
     return await run_tour_search(request)
 
 
-@app.post("/", response_model=BotResponse)
+def to_short_response(response: BotResponse) -> ShortBotResponse:
+    """Return only fields that Suvvy needs.
+
+    Suvvy webhook actions have a maximum response length. The full response
+    contains tours/cards/images/messages and can exceed that limit before
+    JSONPath extraction happens. Keep /tour-search tiny and put the large
+    payload on /tour-search-full for Swagger/debug/future image delivery.
+    """
+    return ShortBotResponse(
+        status=response.status,
+        found=response.found,
+        client_text=response.client_text,
+        tours_count=response.tours_count,
+        search_id=response.search_id,
+    )
+
+
+async def authenticated_tour_search_short(
+    request: TourSearchRequest,
+    authorization: str | None,
+) -> ShortBotResponse:
+    full_response = await authenticated_tour_search(request, authorization)
+    return to_short_response(full_response)
+
+
+@app.post("/", response_model=ShortBotResponse)
 async def suvvy_tour_search_root(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
-) -> BotResponse:
+) -> ShortBotResponse:
     """Root webhook alias for platforms/proxies that fail on nested paths."""
     logger.info("Received Suvvy tour-search webhook on root alias /")
-    return await authenticated_tour_search(request, authorization)
+    return await authenticated_tour_search_short(request, authorization)
 
 
-@app.post("/tour-search", response_model=BotResponse)
+@app.post("/tour-search", response_model=ShortBotResponse)
 async def suvvy_tour_search_short(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
-) -> BotResponse:
+) -> ShortBotResponse:
     """Short webhook alias."""
     logger.info("Received Suvvy tour-search webhook on /tour-search")
-    return await authenticated_tour_search(request, authorization)
+    return await authenticated_tour_search_short(request, authorization)
 
 
-@app.post("/suvvy", response_model=BotResponse)
+@app.post("/suvvy", response_model=ShortBotResponse)
 async def suvvy_tour_search_suvvy_alias(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
-) -> BotResponse:
+) -> ShortBotResponse:
     """Simple webhook alias for Suvvy UI."""
     logger.info("Received Suvvy tour-search webhook on /suvvy")
-    return await authenticated_tour_search(request, authorization)
+    return await authenticated_tour_search_short(request, authorization)
 
 
-@app.post("/api/suvvy/tour-search", response_model=BotResponse)
+@app.post("/api/suvvy/tour-search", response_model=ShortBotResponse)
 async def suvvy_tour_search(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
-) -> BotResponse:
+) -> ShortBotResponse:
     logger.info("Received Suvvy tour-search webhook on /api/suvvy/tour-search")
+    return await authenticated_tour_search_short(request, authorization)
+
+
+@app.post("/tour-search-full", response_model=BotResponse)
+async def suvvy_tour_search_full(
+    request: TourSearchRequest,
+    authorization: str | None = Header(default=None),
+) -> BotResponse:
+    """Full payload endpoint for Swagger/debug/future image mapping. Do not use in Suvvy text webhook."""
+    logger.info("Received FULL Suvvy tour-search webhook on /tour-search-full")
+    return await authenticated_tour_search(request, authorization)
+
+
+@app.post("/api/suvvy/tour-search-full", response_model=BotResponse)
+async def suvvy_tour_search_full_api(
+    request: TourSearchRequest,
+    authorization: str | None = Header(default=None),
+) -> BotResponse:
+    """Full payload endpoint for Swagger/debug/future image mapping. Do not use in Suvvy text webhook."""
+    logger.info("Received FULL Suvvy tour-search webhook on /api/suvvy/tour-search-full")
     return await authenticated_tour_search(request, authorization)
 
 

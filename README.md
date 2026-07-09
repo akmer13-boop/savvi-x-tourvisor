@@ -147,3 +147,21 @@ This build adds ultra-fast diagnostic endpoints for webhook debugging:
 - `GET/POST/HEAD/OPTIONS /tour-search-fast`
 
 They return 200 immediately and do not call Tourvisor. Amvera logs will show `INCOMING` as soon as any request reaches FastAPI.
+
+
+## Short response fix for Suvvy
+
+This build makes Suvvy-facing endpoints return a compact response only:
+
+- `status`
+- `found`
+- `client_text`
+- `tours_count`
+- `search_id`
+
+Full payload with `tours/cards/images/messages` is available only on:
+
+- `POST /tour-search-full`
+- `POST /api/suvvy/tour-search-full`
+
+Use `POST /tour-search` in Suvvy to avoid the “response length exceeds maximum allowed” error.

@@ -111,3 +111,11 @@ class BotResponse(BaseModel):
     images: list[dict[str, Any]] = Field(default_factory=list, description="Фото отдельным массивом; URL уже полные https")
     messages: list[dict[str, Any]] = Field(default_factory=list, description="Упорядоченные блоки text/image для интеграции")
     image_delivery_note: str | None = Field(default=None, description="Подсказка, как корректно выводить изображения в Suvvy")
+
+
+class ShortBotResponse(BaseModel):
+    status: str = "ok"
+    found: bool
+    client_text: str
+    tours_count: int = 0
+    search_id: str | None = None
