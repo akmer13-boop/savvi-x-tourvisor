@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.2.0",
+    version="0.2.1",
     description=(
         "Service that receives tour parameters from Suvvy, searches Tourvisor, "
         "and returns clean text plus structured cards/images for user-friendly delivery."
@@ -63,7 +63,7 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.0"}
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.1"}
 
 
 @app.get("/ping")
@@ -76,12 +76,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/suvvy/tour-search", response_model=BotResponse)
-async def suvvy_tour_search(
-    request: TourSearchRequest,
-    authorization: str | None = Header(default=None),
-) -> BotResponse:
-    verify_suvvy_token(authorization, request.auth_token)
+async def run_tour_search(request: TourSearchRequest) -> BotResponse:
     try:
         client = TourvisorClient()
         search_id, tours = await client.search_tours(request)
@@ -108,8 +103,6 @@ async def suvvy_tour_search(
             messages=messages,
             image_delivery_note=IMAGE_DELIVERY_NOTE if images else None,
         )
-    except HTTPException:
-        raise
     except UserInputError as exc:
         return BotResponse(
             status="ok",
@@ -132,3 +125,59 @@ async def suvvy_tour_search(
             search_id=None,
             image_delivery_note=None,
         )
+
+
+async def authenticated_tour_search(
+    request: TourSearchRequest,
+    authorization: str | None,
+) -> BotResponse:
+    verify_suvvy_token(authorization, request.auth_token)
+    return await run_tour_search(request)
+
+
+@app.post("/", response_model=BotResponse)
+async def suvvy_tour_search_root(
+    request: TourSearchRequest,
+    authorization: str | None = Header(default=None),
+) -> BotResponse:
+    """Root webhook alias for platforms/proxies that fail on nested paths."""
+    logger.info("Received Suvvy tour-search webhook on root alias /")
+    return await authenticated_tour_search(request, authorization)
+
+
+@app.post("/tour-search", response_model=BotResponse)
+async def suvvy_tour_search_short(
+    request: TourSearchRequest,
+    authorization: str | None = Header(default=None),
+) -> BotResponse:
+    """Short webhook alias."""
+    logger.info("Received Suvvy tour-search webhook on /tour-search")
+    return await authenticated_tour_search(request, authorization)
+
+
+@app.post("/suvvy", response_model=BotResponse)
+async def suvvy_tour_search_suvvy_alias(
+    request: TourSearchRequest,
+    authorization: str | None = Header(default=None),
+) -> BotResponse:
+    """Simple webhook alias for Suvvy UI."""
+    logger.info("Received Suvvy tour-search webhook on /suvvy")
+    return await authenticated_tour_search(request, authorization)
+
+
+@app.post("/api/suvvy/tour-search", response_model=BotResponse)
+async def suvvy_tour_search(
+    request: TourSearchRequest,
+    authorization: str | None = Header(default=None),
+) -> BotResponse:
+    logger.info("Received Suvvy tour-search webhook on /api/suvvy/tour-search")
+    return await authenticated_tour_search(request, authorization)
+
+
+@app.get("/api/suvvy/tour-search")
+async def suvvy_tour_search_diagnostic() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "message": "Use POST with JSON body for tour search.",
+        "recommended_suvvy_url": "/ or /tour-search if nested path is blocked by proxy",
+    }

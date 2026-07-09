@@ -119,3 +119,20 @@ LOG_LEVEL=INFO
 - Цены и наличие нужно проверять менеджером перед продажей.
 - Если есть дети, Tourvisor требует возраст каждого ребёнка. Передавайте `children_ages`.
 - Если у Tourvisor не подключён API описаний/номеров, туры вернутся без `room_images`, сервис не падает.
+
+## Suvvy / Amvera routing fallback
+
+If Suvvy receives an Amvera HTML `404 Not Found` for `/api/suvvy/tour-search`, use the root alias instead:
+
+```text
+https://<your-amvera-domain>/
+```
+
+This version accepts the same JSON body on all of these POST routes:
+
+- `/`
+- `/tour-search`
+- `/suvvy`
+- `/api/suvvy/tour-search`
+
+Recommended Suvvy URL for problematic routing: `https://<your-amvera-domain>/`.
