@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.formatting import format_tours_for_client
+from app.formatting import format_tours_for_client, format_tours_with_images_for_client
 from app.media import cards_from_tours, image_assets_from_tours, message_blocks_from_tours, normalize_tour_media
 from app.models import BotResponse, ShortBotResponse, TourSearchRequest
 from app.ranking import select_best_tours
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.2.2",
+    version="0.2.3",
     description=(
         "Service that receives tour parameters from Suvvy, searches Tourvisor, "
         "and returns clean text plus structured cards/images for user-friendly delivery."
@@ -102,7 +102,7 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.2"}
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.3"}
 
 
 @app.get("/ping")
@@ -164,9 +164,16 @@ async def run_tour_search(request: TourSearchRequest) -> BotResponse:
         for tour in selected:
             normalize_tour_media(tour)
 
-        include_image_links = request.image_mode == "links_in_text"
-        client_text = format_tours_for_client(selected, request, include_image_links=include_image_links)
-        images = [] if request.image_mode == "none" else image_assets_from_tours(selected, limit_per_tour=1)
+        # For Suvvy, keep /tour-search short but include direct image URLs inside client_text.
+        # When Suvvy's structured answers are enabled, direct image links can be rendered as images.
+        if request.image_mode == "none":
+            client_text = format_tours_for_client(selected, request, include_image_links=False)
+        elif request.image_mode in {"structured", "links_in_text"}:
+            client_text = format_tours_with_images_for_client(selected, request, images_per_tour=2)
+        else:
+            client_text = format_tours_for_client(selected, request, include_image_links=False)
+
+        images = [] if request.image_mode == "none" else image_assets_from_tours(selected, limit_per_tour=2)
         cards = cards_from_tours(selected)
         messages = [] if request.image_mode == "none" else message_blocks_from_tours(client_text, selected)
 

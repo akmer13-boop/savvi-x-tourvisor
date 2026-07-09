@@ -36,6 +36,26 @@ class TourSearchRequest(BaseModel):
             raise ValueError("field is required")
         return value
 
+    @field_validator(
+        "auth_token",
+        "resort",
+        "date_from",
+        "date_to",
+        "meal",
+        "hotel_preferences",
+        "beach_preferences",
+        "client_name",
+        "client_phone",
+        "chat_id",
+        "source",
+        mode="before",
+    )
+    @classmethod
+    def strip_optional_text(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
     @field_validator("children_ages", mode="before")
     @classmethod
     def parse_children_ages(cls, value: Any) -> list[int]:

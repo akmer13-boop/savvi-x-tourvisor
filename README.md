@@ -165,3 +165,29 @@ Full payload with `tours/cards/images/messages` is available only on:
 - `POST /api/suvvy/tour-search-full`
 
 Use `POST /tour-search` in Suvvy to avoid the “response length exceeds maximum allowed” error.
+
+
+## 0.2.3 — structured image links for Suvvy
+
+В этой сборке `POST /tour-search` остаётся коротким, но поле `client_text` теперь содержит прямые ссылки на 1–2 фотографии под каждым отелем.
+
+Формат ответа для Suvvy:
+
+```json
+{
+  "status": "ok",
+  "found": true,
+  "client_text": "Отель + параметры + прямые ссылки на фото",
+  "tours_count": 5,
+  "search_id": "..."
+}
+```
+
+Что поменять в Suvvy после деплоя:
+
+1. В настройках бота включить `Использовать структурированный ответ`, если доступно на тарифе.
+2. В действии Tourvisor оставить параметр ответа: `client_text` → `$.client_text`.
+3. В системную инструкцию добавить: `Если в ответе Tourvisor есть прямые ссылки на фото, не удаляй и не изменяй их. Отправь client_text клиенту без изменений.`
+4. В теле запроса можно не указывать `image_mode`; по умолчанию используется `structured`.
+
+Полный JSON с массивами `tours/cards/images/messages` по-прежнему доступен на `/tour-search-full` для отладки.

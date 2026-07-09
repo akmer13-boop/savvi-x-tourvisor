@@ -99,3 +99,48 @@ def format_tours_for_client(
     lines.append("Цены актуальны на момент поиска. Перед бронированием менеджер проверит наличие, перелёт и финальную стоимость.")
     lines.append("Хотите, я передам эти варианты менеджеру для проверки и точной подборки?")
     return "\n".join(lines)
+
+
+def _tour_images(tour: TourOption, max_images: int = 2) -> list[str]:
+    images: list[str] = []
+    for url in tour.room_images:
+        if url and url not in images:
+            images.append(url)
+        if len(images) >= max_images:
+            return images
+    if tour.tour_picture and tour.tour_picture not in images:
+        images.append(tour.tour_picture)
+    return images[:max_images]
+
+
+def format_tours_with_images_for_client(
+    tours: list[TourOption],
+    request: TourSearchRequest,
+    images_per_tour: int = 2,
+) -> str:
+    """Human-readable structured text with direct image URLs.
+
+    Suvvy structured answers can render images when the final bot response contains
+    direct image links. Keep this payload compact: no JSON arrays, only text + direct
+    URLs grouped under each hotel.
+    """
+    if not tours:
+        return format_tours_for_client(tours, request, include_image_links=False)
+
+    lines: list[str] = ["Нашёл предварительные варианты под ваш запрос:"]
+
+    for index, tour in enumerate(tours, start=1):
+        lines.append("")
+        lines.append(format_tour_card_text(tour, request, index))
+
+        images = _tour_images(tour, max_images=images_per_tour)
+        if images:
+            label = "Фото номера:" if tour.room_images else "Фото отеля:"
+            lines.append(label)
+            for url in images:
+                lines.append(url)
+
+    lines.append("")
+    lines.append("Цены актуальны на момент поиска. Перед бронированием менеджер проверит наличие, перелёт и финальную стоимость.")
+    lines.append("Хотите, я передам эти варианты менеджеру для проверки и точной подборки?")
+    return "\n".join(lines)
