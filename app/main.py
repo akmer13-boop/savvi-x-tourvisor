@@ -1,7 +1,10 @@
 import logging
+import time
+import uuid
 
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.formatting import format_tours_for_client
@@ -26,9 +29,45 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+
+
+@app.middleware("http")
+async def log_every_incoming_request(request: Request, call_next):
+    """Log requests at entry point, before route handling.
+
+    This is intentionally noisy while debugging Suvvy webhooks: if the request
+    reaches FastAPI at all, Amvera logs will show INCOMING immediately, even if
+    the client disconnects, the body is invalid, or downstream Tourvisor is slow.
+    """
+    request_id = uuid.uuid4().hex[:8]
+    started = time.perf_counter()
+    logger.info(
+        "INCOMING request_id=%s method=%s path=%s query=%s user_agent=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        request.url.query,
+        request.headers.get("user-agent", ""),
+    )
+    try:
+        response = await call_next(request)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "OUTGOING request_id=%s status=%s elapsed_ms=%s",
+            request_id,
+            response.status_code,
+            elapsed_ms,
+        )
+        return response
+    except Exception:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.exception("FAILED request_id=%s elapsed_ms=%s", request_id, elapsed_ms)
+        raise
 
 
 IMAGE_DELIVERY_NOTE = (
@@ -74,6 +113,46 @@ async def ping() -> dict[str, str]:
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+
+
+@app.api_route("/suvvy-debug", methods=["GET", "POST", "HEAD", "OPTIONS"])
+@app.api_route("/debug", methods=["GET", "POST", "HEAD", "OPTIONS"])
+@app.api_route("/tour-search-fast", methods=["GET", "POST", "HEAD", "OPTIONS"])
+async def suvvy_debug_endpoint(request: Request) -> Response:
+    """Ultra-fast webhook diagnostics endpoint for Suvvy.
+
+    It does not validate tokens and does not call Tourvisor. Use it only to prove
+    whether a Suvvy webhook reaches the Amvera FastAPI container.
+    """
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
+    body_preview = ""
+    try:
+        raw = await request.body()
+        body_preview = raw[:500].decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        body_preview = "<unable to read body>"
+
+    logger.info(
+        "SUVVY_DEBUG_HIT method=%s path=%s body_preview=%s",
+        request.method,
+        request.url.path,
+        body_preview,
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok",
+            "found": True,
+            "client_text": "Диагностика успешна: Suvvy дошёл до Amvera. Вебхук работает, можно возвращать боевой URL поиска тура.",
+            "source": "amvera_fastapi_debug",
+            "method": request.method,
+            "path": request.url.path,
+        },
+    )
 
 
 async def run_tour_search(request: TourSearchRequest) -> BotResponse:

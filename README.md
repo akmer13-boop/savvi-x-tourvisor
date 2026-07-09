@@ -136,3 +136,14 @@ This version accepts the same JSON body on all of these POST routes:
 - `/api/suvvy/tour-search`
 
 Recommended Suvvy URL for problematic routing: `https://<your-amvera-domain>/`.
+
+
+## Suvvy diagnostics endpoints
+
+This build adds ultra-fast diagnostic endpoints for webhook debugging:
+
+- `GET/POST/HEAD/OPTIONS /suvvy-debug`
+- `GET/POST/HEAD/OPTIONS /debug`
+- `GET/POST/HEAD/OPTIONS /tour-search-fast`
+
+They return 200 immediately and do not call Tourvisor. Amvera logs will show `INCOMING` as soon as any request reaches FastAPI.
