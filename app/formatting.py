@@ -53,8 +53,6 @@ def format_tour_card_text(tour: TourOption, request: TourSearchRequest, index: i
     price = _money(tour.price, tour.currency)
     if price:
         lines.append(f"• Цена: от {price}")
-    if tour.operator:
-        lines.append(f"• Туроператор: {tour.operator}")
     if tour.rating:
         lines.append(f"• Рейтинг отеля: {tour.rating}")
     if tour.link:

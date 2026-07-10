@@ -191,3 +191,9 @@ Use `POST /tour-search` in Suvvy to avoid the “response length exceeds maximum
 4. В теле запроса можно не указывать `image_mode`; по умолчанию используется `structured`.
 
 Полный JSON с массивами `tours/cards/images/messages` по-прежнему доступен на `/tour-search-full` для отладки.
+
+
+## Stakeholder update
+
+Client-facing responses no longer include tour operator information.
+Tour operator data may still be present only in internal Tourvisor raw payloads and is not displayed in `/tour-search` client_text, cards, or public tour dictionaries.

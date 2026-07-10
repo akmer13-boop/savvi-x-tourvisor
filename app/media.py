@@ -99,7 +99,6 @@ def cards_from_tours(tours: list[TourOption]) -> list[dict[str, Any]]:
                 "room": tour.room,
                 "fly_date": tour.fly_date,
                 "nights": tour.nights,
-                "operator": tour.operator,
                 "rating": tour.rating,
                 "link": tour.link,
             }

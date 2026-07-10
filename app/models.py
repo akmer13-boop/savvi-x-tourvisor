@@ -110,7 +110,6 @@ class TourOption(BaseModel):
             "children": self.children,
             "price": self.price,
             "currency": self.currency,
-            "operator": self.operator,
             "room": self.room,
             "room_id": self.room_id,
             "room_images": self.room_images,
