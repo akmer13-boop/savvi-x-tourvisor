@@ -79,6 +79,55 @@ class TourvisorClient:
         tours = self._parse_search_results(results, request)
         return search_id, tours
 
+    async def enrich_tours_with_hotel_details(self, tours: list[TourOption]) -> list[TourOption]:
+        """Attach the official Tourvisor hotel cover image.
+
+        Tourvisor docs: GET /search/api/v1/hotels/{hotelId} returns the hotel
+        description and an ordered ``images`` array. This method belongs to the
+        separately paid Hotel Descriptions API. The first image is treated as
+        the selling/cover photo. If access is unavailable, the search remains
+        successful and the response falls back to room photos.
+        """
+        if settings.mock_tourvisor or not settings.tourvisor_enable_hotel_images:
+            return tours
+
+        hotel_ids = sorted({tour.hotel_id for tour in tours if tour.hotel_id})
+        if not hotel_ids:
+            return tours
+
+        async def fetch_one(client: httpx.AsyncClient, hotel_id: int) -> tuple[int, Any | None]:
+            path = f"/search/api/v1/hotels/{hotel_id}"
+            url = f"{self.base_url}{path}"
+            try:
+                response = await client.get(url, headers=self.headers)
+                if response.status_code in {401, 402, 403}:
+                    logger.warning(
+                        "Hotel Descriptions API is unavailable for hotel_id=%s: HTTP %s. "
+                        "Enable the paid Tourvisor Hotel Descriptions API to receive selling photos.",
+                        hotel_id,
+                        response.status_code,
+                    )
+                    return hotel_id, None
+                response.raise_for_status()
+                return hotel_id, response.json()
+            except Exception:  # noqa: BLE001 - media enrichment must never break search
+                logger.exception("Unable to fetch Tourvisor hotel description for hotel_id=%s", hotel_id)
+                return hotel_id, None
+
+        async with httpx.AsyncClient(timeout=settings.tourvisor_timeout_seconds) as client:
+            payloads = await asyncio.gather(*(fetch_one(client, hotel_id) for hotel_id in hotel_ids))
+
+        payload_by_id = dict(payloads)
+        image_limit = max(settings.tourvisor_hotel_images_limit, 1)
+        for tour in tours:
+            if not tour.hotel_id:
+                continue
+            images = _extract_hotel_images(payload_by_id.get(tour.hotel_id))
+            if images:
+                # The first image in the official description is the main/cover photo.
+                tour.tour_picture = images[:image_limit][0]
+        return tours
+
     async def enrich_tours_with_room_details(self, tours: list[TourOption]) -> list[TourOption]:
         """Attach room details/images by roomId.
 
@@ -383,6 +432,31 @@ class TourvisorClient:
                 link=settings.tourvisor_public_search_url or None,
             ),
         ]
+
+
+def _extract_hotel_images(payload: Any) -> list[str]:
+    """Read hotel images from both documented and defensive response shapes."""
+    item: Any = payload
+    if isinstance(payload, list):
+        item = payload[0] if payload else None
+    if not isinstance(item, dict):
+        return []
+
+    raw_images = item.get("images") or []
+    if not isinstance(raw_images, list):
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for image in raw_images:
+        value: Any = image
+        if isinstance(image, dict):
+            value = image.get("url") or image.get("image") or image.get("src")
+        url = absolute_url(str(value)) if value else None
+        if url and url not in seen:
+            result.append(url)
+            seen.add(url)
+    return result
 
 
 def _normalize(value: Any) -> str:

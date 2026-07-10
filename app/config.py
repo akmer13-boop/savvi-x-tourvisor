@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     tourvisor_allowed_operator_ids: str = ""
 
     # Media
+    tourvisor_enable_hotel_images: bool = True
+    tourvisor_hotel_images_limit: int = 1
     tourvisor_enable_room_images: bool = True
     tourvisor_room_images_limit: int = 2
     tourvisor_main_image_limit: int = 1

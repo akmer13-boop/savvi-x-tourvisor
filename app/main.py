@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.3.0",
+    version="0.3.1",
     description=(
         "Service that receives tour parameters from Suvvy, searches Tourvisor, "
         "and returns clean text plus structured cards/images for user-friendly delivery."
@@ -101,7 +101,7 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.3.0"}
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.3.1"}
 
 
 @app.get("/ping")
@@ -159,6 +159,10 @@ async def run_tour_search(request: TourSearchRequest) -> BotResponse:
         client = TourvisorClient()
         search_id, tours = await client.search_tours(request)
         selected = select_best_tours(tours, request, limit=5)
+        # The tour-search result does not reliably contain a hotel cover image.
+        # Fetch the official hotel description and take its first image as the
+        # selling/cover photo, then enrich the chosen room separately.
+        selected = await client.enrich_tours_with_hotel_details(selected)
         selected = await client.enrich_tours_with_room_details(selected)
         for tour in selected:
             normalize_tour_media(tour)

@@ -3,6 +3,7 @@ import unittest
 from app.formatting import format_tours_with_images_for_client
 from app.models import TourOption, TourSearchRequest
 from app.ranking import select_best_tours
+from app.tourvisor_client import _extract_hotel_images
 
 
 class BusinessRulesTest(unittest.TestCase):
@@ -61,6 +62,12 @@ class BusinessRulesTest(unittest.TestCase):
         self.assertIn("19 августа 2026 года", text)
         self.assertLess(text.index("hotel.jpg"), text.index("room1.jpg"))
         self.assertNotIn("Хотите, я передам", text)
+
+    def test_extract_official_hotel_cover(self):
+        payload = [{"id": 15870, "images": ["//static.tourvisor.ru/hotel_pics/main.jpg", "https://example.com/2.jpg"]}]
+        images = _extract_hotel_images(payload)
+        self.assertEqual(images[0], "https://static.tourvisor.ru/hotel_pics/main.jpg")
+
 
 
 if __name__ == "__main__":
