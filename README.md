@@ -123,3 +123,21 @@ POST /tour-search
 - Успешный статус: `200`.
 - Искусственную задержку перед вызовом действия отключить в интерфейсе Suvvy.
 - Итоговая инструкция для бота находится в `SUVVY_FINAL_PROMPT_V3.txt`.
+
+## v0.3.2: optimisation for Suvvy 1024-token output cap
+
+The public Suvvy endpoints (`/tour-search`, `/suvvy`, `/api/suvvy/tour-search`)
+return a compact selection by default: 3 hotels, one official hotel cover and
+one room image per hotel. The full debug endpoint remains `/tour-search-full`.
+
+Environment variables:
+
+```env
+SUVVY_TOURS_LIMIT=3
+SUVVY_ROOM_IMAGES_PER_TOUR=1
+SUVVY_COMPACT_OUTPUT=true
+```
+
+Amvera logs include `SUVVY_RESPONSE_METRICS` with character count, URL count and
+a rough output-token estimate. This estimate is diagnostic only; Suvvy controls
+the actual model tokenizer.

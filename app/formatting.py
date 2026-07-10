@@ -203,3 +203,69 @@ def format_tours_with_images_for_client(
     lines.append("")
     lines.append("Цены актуальны на момент поиска. Перед бронированием менеджер проверит наличие, перелёт и финальную стоимость.")
     return "\n".join(lines)
+
+
+def format_tours_compact_for_suvvy(
+    tours: list[TourOption],
+    request: TourSearchRequest,
+    room_images_per_tour: int = 1,
+) -> str:
+    """Compact client text for Suvvy plans capped at 1024 output tokens.
+
+    Keeps the stakeholder-required content and image order, but avoids the
+    verbose five-card response that makes the LLM copy more than 1024 tokens.
+    """
+    if not tours:
+        return format_tours_for_client(tours, request, include_image_links=False)
+
+    lines: list[str] = ["Нашла подходящие варианты:"]
+    for index, tour in enumerate(tours, start=1):
+        title = tour.hotel + (f" {tour.stars}★" if tour.stars else "")
+        lines.extend(["", f"🏨 {index}. {title}"])
+
+        location = _location(tour)
+        if location:
+            lines.append(f"📍 {location}")
+
+        trip_parts: list[str] = []
+        fly_date = _format_date_ru(tour.fly_date)
+        if fly_date:
+            trip_parts.append(fly_date)
+        if tour.nights:
+            trip_parts.append(f"{tour.nights} {_night_word(tour.nights)}")
+        if trip_parts:
+            lines.append("✈️ " + " • ".join(trip_parts))
+
+        lines.append(f"👥 {_travelers_text(request)}")
+        if tour.meal:
+            lines.append(f"🍽️ {tour.meal}")
+        if tour.room:
+            room_line = f"🛏️ {tour.room}"
+            extras: list[str] = []
+            if tour.room_area:
+                extras.append(f"{tour.room_area} м²")
+            if tour.room_view_description:
+                extras.append(tour.room_view_description)
+            if extras:
+                room_line += " (" + ", ".join(extras) + ")"
+            lines.append(room_line)
+
+        price = _money(tour.price, tour.currency)
+        if price:
+            lines.append(f"💰 от {price}")
+
+        main_images, room_images = _group_images(
+            tour,
+            room_limit=max(room_images_per_tour, 0),
+        )
+        if main_images:
+            lines.append(f"🖼️ Отель: {main_images[0]}")
+        for image_index, image_url in enumerate(room_images, start=1):
+            label = "Номер" if len(room_images) == 1 else f"Номер {image_index}"
+            lines.append(f"🖼️ {label}: {image_url}")
+
+    lines.extend([
+        "",
+        "Цены актуальны на момент поиска. Наличие, перелёт и итоговую стоимость проверит менеджер.",
+    ])
+    return "\n".join(lines)

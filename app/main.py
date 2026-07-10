@@ -1,4 +1,6 @@
 import logging
+import math
+import re
 import time
 import uuid
 
@@ -7,7 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.formatting import format_tours_for_client, format_tours_with_images_for_client
+from app.formatting import (
+    format_tours_compact_for_suvvy,
+    format_tours_for_client,
+    format_tours_with_images_for_client,
+)
 from app.media import cards_from_tours, image_assets_from_tours, message_blocks_from_tours, normalize_tour_media
 from app.models import BotResponse, ShortBotResponse, TourSearchRequest
 from app.ranking import select_best_tours
@@ -18,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.3.1",
+    version="0.3.2",
     description=(
         "Service that receives tour parameters from Suvvy, searches Tourvisor, "
         "and returns clean text plus structured cards/images for user-friendly delivery."
@@ -101,7 +107,7 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.3.1"}
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.3.2"}
 
 
 @app.get("/ping")
@@ -154,11 +160,17 @@ async def suvvy_debug_endpoint(request: Request) -> Response:
     )
 
 
-async def run_tour_search(request: TourSearchRequest) -> BotResponse:
+async def run_tour_search(
+    request: TourSearchRequest,
+    *,
+    tour_limit: int = 5,
+    compact_for_suvvy: bool = False,
+    room_images_per_tour: int = 2,
+) -> BotResponse:
     try:
         client = TourvisorClient()
         search_id, tours = await client.search_tours(request)
-        selected = select_best_tours(tours, request, limit=5)
+        selected = select_best_tours(tours, request, limit=max(tour_limit, 1))
         # The tour-search result does not reliably contain a hotel cover image.
         # Fetch the official hotel description and take its first image as the
         # selling/cover photo, then enrich the chosen room separately.
@@ -171,12 +183,37 @@ async def run_tour_search(request: TourSearchRequest) -> BotResponse:
         # When Suvvy's structured answers are enabled, direct image links can be rendered as images.
         if request.image_mode == "none":
             client_text = format_tours_for_client(selected, request, include_image_links=False)
+        elif compact_for_suvvy and request.image_mode in {"structured", "links_in_text"}:
+            client_text = format_tours_compact_for_suvvy(
+                selected,
+                request,
+                room_images_per_tour=room_images_per_tour,
+            )
         elif request.image_mode in {"structured", "links_in_text"}:
-            client_text = format_tours_with_images_for_client(selected, request, images_per_tour=2)
+            client_text = format_tours_with_images_for_client(
+                selected,
+                request,
+                images_per_tour=room_images_per_tour,
+            )
         else:
             client_text = format_tours_for_client(selected, request, include_image_links=False)
 
-        images = [] if request.image_mode == "none" else image_assets_from_tours(selected, limit_per_tour=2)
+        url_count = len(re.findall(r"https?://\S+", client_text))
+        # Rough, deliberately conservative estimate only; the exact tokenizer is controlled by Suvvy.
+        approx_output_tokens = math.ceil(len(client_text) / 2.5)
+        logger.info(
+            "SUVVY_RESPONSE_METRICS compact=%s tours=%s chars=%s urls=%s approx_output_tokens=%s",
+            compact_for_suvvy,
+            len(selected),
+            len(client_text),
+            url_count,
+            approx_output_tokens,
+        )
+
+        images = [] if request.image_mode == "none" else image_assets_from_tours(
+            selected,
+            limit_per_tour=room_images_per_tour,
+        )
         cards = cards_from_tours(selected)
         messages = [] if request.image_mode == "none" else message_blocks_from_tours(client_text, selected)
 
@@ -245,8 +282,14 @@ async def authenticated_tour_search_short(
     request: TourSearchRequest,
     authorization: str | None,
 ) -> ShortBotResponse:
-    full_response = await authenticated_tour_search(request, authorization)
-    return to_short_response(full_response)
+    verify_suvvy_token(authorization, request.auth_token)
+    response = await run_tour_search(
+        request,
+        tour_limit=settings.suvvy_tours_limit,
+        compact_for_suvvy=settings.suvvy_compact_output,
+        room_images_per_tour=settings.suvvy_room_images_per_tour,
+    )
+    return to_short_response(response)
 
 
 @app.post("/", response_model=ShortBotResponse)

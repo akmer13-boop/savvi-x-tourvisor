@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     tourvisor_room_images_limit: int = 2
     tourvisor_main_image_limit: int = 1
 
+    # Suvvy Free/Start plan output optimisation (1024 max output tokens)
+    suvvy_tours_limit: int = 3
+    suvvy_room_images_per_tour: int = 1
+    suvvy_compact_output: bool = True
+
     # Backward-compatible names from the first MVP build.
     tourvisor_api_key: str = ""
     tourvisor_search_url: str = ""
