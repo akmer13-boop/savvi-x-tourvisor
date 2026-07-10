@@ -1,8 +1,9 @@
+from app.config import settings
 from app.models import TourOption, TourSearchRequest
 
 
 def score_tour(tour: TourOption, request: TourSearchRequest) -> int:
-    """Simple MVP scoring. Replace with business rules after first pilot."""
+    """MVP scoring after mandatory business filters."""
     score = 0
 
     if request.budget and tour.price:
@@ -33,15 +34,22 @@ def score_tour(tour: TourOption, request: TourSearchRequest) -> int:
         score += 5
 
     if tour.price:
-        # Small tie-breaker: cheaper tours rank slightly better after relevance filters.
         score += max(0, 10 - int(tour.price / 100000))
 
     return score
 
 
 def select_best_tours(tours: list[TourOption], request: TourSearchRequest, limit: int = 5) -> list[TourOption]:
+    # Stakeholder rule: only hotels with an explicit rating >= configured threshold.
+    min_rating = settings.tourvisor_min_hotel_rating
+    tours = [tour for tour in tours if tour.rating is not None and tour.rating >= min_rating]
+
+    if settings.operator_whitelist_active:
+        allowed = settings.allowed_operator_ids
+        tours = [tour for tour in tours if tour.operator_id in allowed]
+
     if request.budget:
-        # Allow +10% because exact tourist budget is often flexible.
+        # Allow +10% because the exact tourist budget is often flexible.
         tours = [tour for tour in tours if not tour.price or tour.price <= int(request.budget * 1.1)]
 
     if request.hotel_stars:

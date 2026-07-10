@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.2.3",
+    version="0.3.0",
     description=(
         "Service that receives tour parameters from Suvvy, searches Tourvisor, "
         "and returns clean text plus structured cards/images for user-friendly delivery."
@@ -71,10 +71,9 @@ async def log_every_incoming_request(request: Request, call_next):
 
 
 IMAGE_DELIVERY_NOTE = (
-    "Webhook-действие Suvvy получает JSON-результат для бота. "
-    "Ссылки на фото не вставлены в client_text, чтобы клиент не видел сырые URL. "
-    "Для вывода фото как картинок используйте массив images/messages и настройку канала/действия, "
-    "которое умеет отправлять image attachments."
+    "Сначала возвращается главное фото тура/отеля из результатов поиска, "
+    "затем фотографии номера. В тарифе Suvvy без структурированных ответов "
+    "прямые URL отображаются как ссылки."
 )
 
 
@@ -102,7 +101,7 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.2.3"}
+    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.3.0"}
 
 
 @app.get("/ping")
@@ -117,9 +116,9 @@ async def health() -> dict[str, str]:
 
 
 
-@app.api_route("/suvvy-debug", methods=["GET", "POST", "HEAD", "OPTIONS"])
-@app.api_route("/debug", methods=["GET", "POST", "HEAD", "OPTIONS"])
-@app.api_route("/tour-search-fast", methods=["GET", "POST", "HEAD", "OPTIONS"])
+@app.api_route("/suvvy-debug", methods=["GET", "POST", "HEAD", "OPTIONS"], name="suvvy_debug")
+@app.api_route("/debug", methods=["GET", "POST", "HEAD", "OPTIONS"], include_in_schema=False)
+@app.api_route("/tour-search-fast", methods=["GET", "POST", "HEAD", "OPTIONS"], include_in_schema=False)
 async def suvvy_debug_endpoint(request: Request) -> Response:
     """Ultra-fast webhook diagnostics endpoint for Suvvy.
 
@@ -204,8 +203,8 @@ async def run_tour_search(request: TourSearchRequest) -> BotResponse:
             status="error",
             found=False,
             client_text=(
-                "Не удалось выполнить поиск тура из-за технической ошибки. "
-                "Я передам запрос менеджеру, чтобы он проверил варианты вручную."
+                "Сейчас не удалось получить автоматическую подборку. "
+                "Я зафиксировала Ваш запрос — менеджер свяжется с Вами в ближайшее время."
             ),
             tours_count=0,
             search_id=None,

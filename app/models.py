@@ -82,6 +82,7 @@ class TourOption(BaseModel):
     price: int | None = None
     currency: str = "RUB"
     operator: str | None = None
+    operator_id: int | None = None
     room: str | None = None
     link: str | None = None
     rating: float | None = None
@@ -115,7 +116,6 @@ class TourOption(BaseModel):
             "room_images": self.room_images,
             "tour_picture": self.tour_picture,
             "link": self.link,
-            "rating": self.rating,
         }
 
 

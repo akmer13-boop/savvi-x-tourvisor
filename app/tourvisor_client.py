@@ -213,8 +213,12 @@ class TourvisorClient:
             "onlyDirect": False,
             "priceTo": request.budget,
             "hotelCategory": request.hotel_stars,
+            "hotelRating": 4,
             "meal": meal_id,
         }
+
+        if settings.operator_whitelist_active:
+            params["operatorIds"] = sorted(settings.allowed_operator_ids)
 
         if request.children_ages:
             params["childs"] = request.children_ages[:3]
@@ -259,19 +263,30 @@ class TourvisorClient:
             if not isinstance(hotel_tours, list):
                 continue
 
-            # For chatbot output we usually need one best/cheapest tour per hotel.
+            # One best/cheapest allowed tour per hotel. Rating is hotel-level and
+            # is filtered again in ranking.py as a safety net.
+            hotel_rating = _to_float(hotel.get("rating"))
+            if hotel_rating is None or hotel_rating < settings.tourvisor_min_hotel_rating:
+                continue
+
             hotel_tours = sorted(hotel_tours, key=lambda item: _to_int(item.get("price")) or 10**12)
-            for tour in hotel_tours[:1]:
+            for tour in hotel_tours:
                 if not isinstance(tour, dict):
                     continue
+                operator = tour.get("operator") or {}
+                operator_id = _to_int(operator.get("id")) if isinstance(operator, dict) else None
+                if settings.operator_whitelist_active and operator_id not in settings.allowed_operator_ids:
+                    continue
+
                 hotel_id = _to_int(hotel.get("id"))
                 if hotel_id and hotel_id in seen_hotels:
-                    continue
+                    break
                 if hotel_id:
                     seen_hotels.add(hotel_id)
                 option = self._parse_tour_option(hotel, tour, request)
                 normalize_tour_media(option)
                 tours.append(option)
+                break
 
         return tours
 
@@ -296,6 +311,7 @@ class TourvisorClient:
             price=_to_int(tour.get("price") or hotel.get("price")),
             currency=str(tour.get("currency") or hotel.get("currency") or settings.tourvisor_currency),
             operator=_operator_text(operator),
+            operator_id=_to_int(operator.get("id")) if isinstance(operator, dict) else None,
             room=tour.get("roomType") or tour.get("name") or tour.get("placement"),
             link=absolute_url(hotel.get("hotelDescriptionLink") or settings.tourvisor_public_search_url or None),
             rating=_to_float(hotel.get("rating")),
