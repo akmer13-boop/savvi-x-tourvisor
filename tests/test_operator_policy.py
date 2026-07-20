@@ -59,15 +59,16 @@ class OperatorPolicyTest(unittest.TestCase):
         self.assertFalse(policy.enforced)
         self.assertEqual(policy.active_count, 0)
 
-    def test_real_runtime_refuses_unconfirmed_empty_registry(self):
+    def test_real_runtime_refuses_empty_registry(self):
         repository = Path(__file__).resolve().parents[1]
+        empty_registry = self._write({"version": "test-empty", "operators": []})
         env = os.environ.copy()
         env.update(
             {
                 "MOCK_TOURVISOR": "false",
                 "TOURVISOR_JWT": "test-only-jwt",
                 "SUVVY_WEBHOOK_TOKEN": "test-only-webhook-token",
-                "OPERATOR_REGISTRY_PATH": "config/operator_registry.json",
+                "OPERATOR_REGISTRY_PATH": str(empty_registry),
             }
         )
         result = subprocess.run(
@@ -80,6 +81,18 @@ class OperatorPolicyTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("active_contract", result.stderr)
+
+    def test_shipped_registry_contains_confirmed_operator_ids(self):
+        repository = Path(__file__).resolve().parents[1]
+        policy = load_operator_policy(
+            repository / "config/operator_registry.json", required=True
+        )
+
+        self.assertEqual(policy.version, "2026-07-21.1")
+        self.assertEqual(
+            policy.active_ids,
+            frozenset({11, 12, 13, 16, 18, 23, 25, 27, 40, 52, 53, 59, 89, 164, 172}),
+        )
 
     def test_real_runtime_starts_with_valid_policy_without_calling_tourvisor(self):
         repository = Path(__file__).resolve().parents[1]

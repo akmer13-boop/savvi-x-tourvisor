@@ -1,4 +1,95 @@
 {
-  "version": "UNCONFIRMED",
-  "operators": []
+  "version": "2026-07-21.1",
+  "operators": [
+    {
+      "tourvisor_id": 13,
+      "name": "Anex",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 53,
+      "name": "Арт-Тур",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 52,
+      "name": "Мальдивиана",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 172,
+      "name": "LOTI",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 27,
+      "name": "Paks",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 12,
+      "name": "Pegas Touristik",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 16,
+      "name": "Sunmar",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 25,
+      "name": "FUN&SUN",
+      "status": "active_contract",
+      "aliases": ["TUI"]
+    },
+    {
+      "tourvisor_id": 40,
+      "name": "ICS Travel Group",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 23,
+      "name": "Russian Express",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 18,
+      "name": "Biblioglobus",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 89,
+      "name": "Kazunion",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 164,
+      "name": "Lets Fly",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 59,
+      "name": "Spectrum",
+      "status": "active_contract",
+      "aliases": []
+    },
+    {
+      "tourvisor_id": 11,
+      "name": "Coral",
+      "status": "active_contract",
+      "aliases": []
+    }
+  ]
 }
