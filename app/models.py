@@ -1,4 +1,5 @@
 from typing import Any, Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -7,12 +8,12 @@ class TourSearchRequest(BaseModel):
     departure_city: str = Field(..., description="Город вылета")
     country: str = Field(..., description="Страна / направление")
     resort: str | None = Field(default=None, description="Курорт, если известен")
-    date_from: str | None = Field(default=None, description="Дата начала диапазона, YYYY-MM-DD или текст из Suvvy")
-    date_to: str | None = Field(default=None, description="Дата конца диапазона, YYYY-MM-DD или текст из Suvvy")
+    date_from: str | None = Field(default=None, description="Начало окна вылета, строго YYYY-MM-DD")
+    date_to: str | None = Field(default=None, description="Конец окна вылета, строго YYYY-MM-DD")
     nights_from: int | None = Field(default=None, ge=1)
     nights_to: int | None = Field(default=None, ge=1)
     adults: int = Field(default=2, ge=1)
-    children: int = Field(default=0, ge=0)
+    children: int = Field(default=0, ge=0, le=3)
     children_ages: list[int] = Field(default_factory=list)
     budget: int | None = Field(default=None, ge=0, description="Бюджет в рублях")
     meal: str | None = Field(default=None, description="Питание")
@@ -67,6 +68,20 @@ class TourSearchRequest(BaseModel):
             return [int(part.strip()) for part in value.replace(";", ",").split(",") if part.strip().isdigit()]
         return []
 
+    @field_validator("budget", mode="before")
+    @classmethod
+    def parse_budget(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise ValueError("budget must be an integer")
+        if isinstance(value, str):
+            cleaned = value.replace(" ", "").replace("\u00a0", "").strip()
+            if not cleaned.isdigit():
+                raise ValueError("budget must be an integer")
+            return int(cleaned)
+        return value
+
 
 class TourOption(BaseModel):
     country: str
@@ -120,11 +135,16 @@ class TourOption(BaseModel):
 
 
 class BotResponse(BaseModel):
-    status: str = "ok"
+    status: Literal["ok", "needs_clarification", "error"] = "ok"
     found: bool
+    reason: str = "FOUND"
+    request_id: str
     client_text: str
     tours_count: int = 0
     search_id: str | None = None
+    whitelist_version: str
+    whitelist_hash: str
+    unverified_preferences: list[str] = Field(default_factory=list)
     tours: list[dict[str, Any]] = Field(default_factory=list)
     cards: list[dict[str, Any]] = Field(default_factory=list, description="Карточки туров для маппинга в Suvvy")
     images: list[dict[str, Any]] = Field(default_factory=list, description="Фото отдельным массивом; URL уже полные https")
@@ -133,8 +153,13 @@ class BotResponse(BaseModel):
 
 
 class ShortBotResponse(BaseModel):
-    status: str = "ok"
+    status: Literal["ok", "needs_clarification", "error"] = "ok"
     found: bool
+    reason: str = "FOUND"
+    request_id: str
     client_text: str
     tours_count: int = 0
     search_id: str | None = None
+    whitelist_version: str
+    whitelist_hash: str
+    unverified_preferences: list[str] = Field(default_factory=list)

@@ -1,143 +1,176 @@
-# Suvvy ↔ Tourvisor Bridge v0.3.1
+# Suvvy ↔ Tourvisor Bridge v0.4.0
 
-Готовая FastAPI-прослойка для связки Suvvy.ai и Tourvisor API.
+FastAPI-прослойка между SUVVY и Tourvisor с обязательной серверной политикой
+контрактных туроператоров.
 
-## Что изменено в v0.3.1
-
-- В поиск Tourvisor передаётся `hotelRating=4`.
-- Дополнительно отбрасываются отели без рейтинга и с рейтингом ниже `4.0`.
-- Рейтинг и туроператор не выводятся клиенту.
-- Ответ оформлен иконками.
-- Даты выводятся в понятном виде: `19 августа 2026 года`.
-- Главное/продающее фото запрашивается через `GET /search/api/v1/hotels/{hotelId}` и выводится первым.
-- Затем выводятся фотографии выбранного номера из `/search/api/v1/rooms`.
-- Если API описаний отелей не подключён, поиск не падает и выводятся только фото номера.
-- Из ответа удалён дублирующий вопрос о передаче менеджеру.
-- При технической ошибке клиент получает безопасное закрывающее сообщение без кода ошибки.
-- Добавлен отключаемый белый список туроператоров по Tourvisor ID.
-- Интервал опроса статуса по умолчанию уменьшен с 3 до 2 секунд.
-
-## Рабочий endpoint для Suvvy
+## Production endpoint
 
 ```text
 POST /tour-search
 ```
 
-Пример внешнего URL:
+Текущий внешний URL:
 
 ```text
 https://suvvy-tourvisor.premium-world.ru/tour-search
 ```
 
-Короткий ответ для Suvvy:
+Служебные проверки не обращаются к Tourvisor:
+
+```text
+GET /health
+GET /ready
+```
+
+## Главное в v0.4.0
+
+- Реальный Tourvisor всегда работает с непустым `active_contract` whitelist.
+- Пустой, отсутствующий или повреждённый реестр блокирует старт приложения.
+- `operatorIds` формируется только сервером и передаётся в Tourvisor.
+- Каждый результат повторно фильтруется по `operator_id`.
+- Бюджет является строгим верхним пределом без допуска `+10%`.
+- `500` страхуется на сервере как `500000` рублей.
+- Окно вылета ограничено семью календарными днями.
+- Ночи, рассчитанные SUVVY, валидируются, но не пересчитываются.
+- При `children=0` дополнительных вопросов нет; при наличии детей нужны все возраста.
+- Ответ содержит `status`, `found`, `reason`, `request_id` и версию whitelist.
+- Debug endpoints и CORS отключены по умолчанию.
+- Основная авторизация — `Authorization: Bearer`.
+
+## Реестр туроператоров
+
+Файл по умолчанию:
+
+```text
+config/operator_registry.json
+```
+
+Формат:
+
+```json
+{
+  "version": "2026-07-20.1",
+  "operators": [
+    {
+      "tourvisor_id": 13,
+      "name": "Anex",
+      "status": "active_contract",
+      "aliases": []
+    }
+  ]
+}
+```
+
+Допустимые статусы:
+
+- `active_contract` — разрешён для автоматической выдачи;
+- `approved_to_contract` — не участвует в автоматической выдаче;
+- `blocked` — исключён.
+
+Текущий файл намеренно содержит пустой список и версию `UNCONFIRMED`.
+Перед production-деплоем необходимо получить утверждённый список
+`active_contract`. При `MOCK_TOURVISOR=false` пустой список не позволит
+приложению запуститься.
+
+## Обязательные переменные Амверы
+
+```text
+APP_ENVIRONMENT=production
+SERVICE_VERSION=0.4.0
+GIT_COMMIT_SHA=<deployed commit>
+SUVVY_WEBHOOK_TOKEN=<secret>
+SUVVY_ALLOW_BODY_TOKEN=true
+MOCK_TOURVISOR=false
+TOURVISOR_API_BASE_URL=https://api.tourvisor.ru
+TOURVISOR_JWT=<secret>
+TOURVISOR_CURRENCY=RUB
+OPERATOR_REGISTRY_PATH=config/operator_registry.json
+ENABLE_DEBUG_ENDPOINTS=false
+EXPOSE_API_DOCS=false
+```
+
+Значения секретов нельзя хранить в репозитории или выводить в логи.
+`SUVVY_ALLOW_BODY_TOKEN=true` оставлен только для переходного периода. После
+переключения SUVVY на Bearer его нужно установить в `false`.
+
+Полный безопасный шаблон находится в `env.example`.
+
+## Валидация запроса
+
+Клиенту достаточно сообщить город вылета, направление, даты и общий бюджет.
+SUVVY передаёт рассчитанные ночи и состав по умолчанию.
+
+Сервер применяет правила:
+
+- `50–999` рублей трактуются как тысячи;
+- `50000+` передаются без изменений;
+- `1–49` и `1000–49999` требуют уточнения;
+- окно вылета — максимум семь календарных дат;
+- дата начала вылета не может быть в прошлом;
+- `nights_from <= nights_to`;
+- разница диапазона ночей — максимум 10;
+- при `children > 0` нужен возраст каждого ребёнка;
+- цена результата не может превышать бюджет;
+- результат без цены не показывается;
+- результат без разрешённого `operator_id` не показывается.
+
+## Необязательные пожелания
+
+`resort`, `meal` и `hotel_stars` передаются в поддерживаемые параметры
+Tourvisor. Свободные `hotel_preferences` и `beach_preferences` сохраняются в
+`unverified_preferences` и передаются менеджеру для проверки. Они не считаются
+выполненными, пока их нельзя подтвердить данными Tourvisor.
+
+## Короткий ответ SUVVY
 
 ```json
 {
   "status": "ok",
   "found": true,
+  "reason": "FOUND",
+  "request_id": "...",
   "client_text": "...",
-  "tours_count": 5,
-  "search_id": "..."
+  "tours_count": 3,
+  "search_id": "...",
+  "whitelist_version": "2026-07-20.1",
+  "whitelist_hash": "...",
+  "unverified_preferences": []
 }
 ```
 
-Полный ответ для Swagger/диагностики:
+Основные причины:
+
+- `FOUND`;
+- `NO_MATCHES`;
+- `INVALID_REQUEST`;
+- `INVALID_BUDGET`;
+- `INVALID_DATES`;
+- `INVALID_NIGHTS`;
+- `CHILD_AGES_REQUIRED`;
+- `CONFIGURATION_ERROR`;
+- `UPSTREAM_TIMEOUT`;
+- `UPSTREAM_ERROR`.
+
+## Локальная проверка
 
 ```text
-POST /tour-search-full
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+.venv/bin/ruff check app tests scripts
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m compileall -q app
+.venv/bin/python scripts/check_secrets.py
 ```
 
-## Переменные Amvera
+Тесты не обращаются к живому Tourvisor. Проверка реальной сериализации
+`operatorIds` выполняется отдельно и только после явного разрешения.
 
-Обязательные:
+## Развёртывание в Амвере
 
-```text
-SUVVY_WEBHOOK_TOKEN=...
-MOCK_TOURVISOR=false
-TOURVISOR_API_BASE_URL=https://api.tourvisor.ru
-TOURVISOR_JWT=...
-TOURVISOR_CURRENCY=RUB
-```
-
-Рекомендуемые:
-
-```text
-TOURVISOR_TIMEOUT_SECONDS=20
-TOURVISOR_POLL_ATTEMPTS=4
-TOURVISOR_POLL_INTERVAL_SECONDS=2
-TOURVISOR_RESULTS_LIMIT=25
-TOURVISOR_MIN_HOTEL_RATING=4.0
-TOURVISOR_ENABLE_HOTEL_IMAGES=true
-TOURVISOR_HOTEL_IMAGES_LIMIT=1
-TOURVISOR_ENABLE_ROOM_IMAGES=true
-TOURVISOR_ROOM_IMAGES_LIMIT=2
-LOG_LEVEL=INFO
-```
-
-## Белый список туроператоров
-
-До получения финального маппинга оставьте:
-
-```text
-TOURVISOR_OPERATOR_WHITELIST_ENABLED=false
-TOURVISOR_ALLOWED_OPERATOR_IDS=
-```
-
-После маппинга названий на ID Tourvisor:
-
-```text
-TOURVISOR_OPERATOR_WHITELIST_ENABLED=true
-TOURVISOR_ALLOWED_OPERATOR_IDS=12,45,78
-```
-
-Сервис передаст `operatorIds` в поиск и дополнительно проверит ID оператора в полученных результатах.
-
-Если флаг включён, но список ID пустой, фильтр не активируется, чтобы случайно не обнулить выдачу.
-
-Шаблон для маппинга: `operator_whitelist_template.csv`.
-
-## Фото
-
-Порядок в клиентском ответе:
-
-1. Первая фотография из `GET /search/api/v1/hotels/{hotelId}` — главное/продающее фото отеля.
-2. До двух фотографий выбранного номера из `/search/api/v1/rooms`.
-
-Метод описания отеля доступен только при подключённом платном разделе Tourvisor «API — описания отелей». Если он недоступен, в логах будет предупреждение HTTP 401/402/403, а клиент увидит только фотографии номера.
-
-## Развёртывание
-
-1. Распаковать архив в корень GitHub-репозитория.
-2. Закоммитить изменения.
-3. В Amvera запустить сборку и перезапуск.
-4. Проверить:
-
-```text
-GET /health
-POST /tour-search
-```
-
-## Важное для Suvvy
-
-- В параметрах ответа: `client_text` → `$.client_text`.
-- Успешный статус: `200`.
-- Искусственную задержку перед вызовом действия отключить в интерфейсе Suvvy.
-- Итоговая инструкция для бота находится в `SUVVY_FINAL_PROMPT_V3.txt`.
-
-## v0.3.2: optimisation for Suvvy 1024-token output cap
-
-The public Suvvy endpoints (`/tour-search`, `/suvvy`, `/api/suvvy/tour-search`)
-return a compact selection by default: 3 hotels, one official hotel cover and
-one room image per hotel. The full debug endpoint remains `/tour-search-full`.
-
-Environment variables:
-
-```env
-SUVVY_TOURS_LIMIT=3
-SUVVY_ROOM_IMAGES_PER_TOUR=1
-SUVVY_COMPACT_OUTPUT=true
-```
-
-Amvera logs include `SUVVY_RESPONSE_METRICS` with character count, URL count and
-a rough output-token estimate. This estimate is diagnostic only; Suvvy controls
-the actual model tokenizer.
+- Docker запускает `uvicorn app.main:app` на порту `80`.
+- В образ копируются `app/` и `config/`.
+- Существующий домен и ingress менять не требуется.
+- `amvera.yml` не используется.
+- Перед сборкой фиксируются Git commit и версия реестра.
+- Rollback выполняется на заранее зафиксированный commit и совместимую
+  конфигурацию.

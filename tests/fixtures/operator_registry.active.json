@@ -1,0 +1,11 @@
+{
+  "version": "test-v1",
+  "operators": [
+    {
+      "tourvisor_id": 13,
+      "name": "Anex",
+      "status": "active_contract",
+      "aliases": []
+    }
+  ]
+}

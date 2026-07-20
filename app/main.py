@@ -1,11 +1,13 @@
+import hmac
 import logging
 import math
 import re
 import time
 import uuid
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.config import settings
@@ -14,54 +16,68 @@ from app.formatting import (
     format_tours_for_client,
     format_tours_with_images_for_client,
 )
-from app.media import cards_from_tours, image_assets_from_tours, message_blocks_from_tours, normalize_tour_media
+from app.media import (
+    cards_from_tours,
+    image_assets_from_tours,
+    message_blocks_from_tours,
+    normalize_tour_media,
+)
 from app.models import BotResponse, ShortBotResponse, TourSearchRequest
+from app.observability import (
+    get_request_id,
+    reset_request_id,
+    safe_chat_id,
+    set_request_id,
+)
+from app.operator_policy import OperatorPolicyConfigurationError
 from app.ranking import select_best_tours
-from app.tourvisor_client import TourvisorClient, UserInputError
+from app.runtime import operator_policy
+from app.tourvisor_client import TourvisorClient
+from app.validation import (
+    SearchInputError,
+    unverified_preferences,
+    validate_and_normalize_search_request,
+)
 
 logging.basicConfig(level=settings.log_level)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Suvvy ↔ Tourvisor Bridge",
-    version="0.3.2",
+    version=settings.service_version,
     description=(
         "Service that receives tour parameters from Suvvy, searches Tourvisor, "
-        "and returns clean text plus structured cards/images for user-friendly delivery."
+        "and returns a safe compact response."
     ),
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    docs_url="/docs" if settings.expose_api_docs else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if settings.expose_api_docs else None,
 )
 
 
+def _new_request_id(request: Request) -> str:
+    incoming = (request.headers.get("x-request-id") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", incoming):
+        return incoming
+    return uuid.uuid4().hex[:12]
 
 
 @app.middleware("http")
-async def log_every_incoming_request(request: Request, call_next):
-    """Log requests at entry point, before route handling.
-
-    This is intentionally noisy while debugging Suvvy webhooks: if the request
-    reaches FastAPI at all, Amvera logs will show INCOMING immediately, even if
-    the client disconnects, the body is invalid, or downstream Tourvisor is slow.
-    """
-    request_id = uuid.uuid4().hex[:8]
+async def request_context_and_logging(request: Request, call_next):
+    request_id = _new_request_id(request)
+    request.state.request_id = request_id
+    token = set_request_id(request_id)
     started = time.perf_counter()
     logger.info(
-        "INCOMING request_id=%s method=%s path=%s query=%s user_agent=%s",
+        "INCOMING request_id=%s method=%s path=%s",
         request_id,
         request.method,
         request.url.path,
-        request.url.query,
-        request.headers.get("user-agent", ""),
     )
     try:
         response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
             "OUTGOING request_id=%s status=%s elapsed_ms=%s",
@@ -74,6 +90,32 @@ async def log_every_incoming_request(request: Request, call_next):
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.exception("FAILED request_id=%s elapsed_ms=%s", request_id, elapsed_ms)
         raise
+    finally:
+        reset_request_id(token)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    del exc
+    request_id = getattr(request.state, "request_id", get_request_id())
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "status": "needs_clarification",
+            "found": False,
+            "reason": "INVALID_REQUEST",
+            "request_id": request_id,
+            "client_text": "Уточните параметры поездки.",
+            "tours_count": 0,
+            "search_id": None,
+            "whitelist_version": operator_policy.version,
+            "whitelist_hash": operator_policy.short_hash,
+            "unverified_preferences": [],
+        },
+    )
 
 
 IMAGE_DELIVERY_NOTE = (
@@ -84,19 +126,27 @@ IMAGE_DELIVERY_NOTE = (
 
 
 def verify_suvvy_token(authorization: str | None, body_token: str | None = None) -> None:
-    """Validate request from Suvvy.
+    """Validate Suvvy without ever logging or returning credential values."""
+    expected = settings.suvvy_webhook_token
+    if not expected:
+        if settings.mock_tourvisor:
+            return
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook authentication is not configured",
+        )
 
-    Preferred: Authorization header = Bearer <SUVVY_WEBHOOK_TOKEN>.
-    Fallback for Swagger/Suvvy UI issues: auth_token field in JSON body = <SUVVY_WEBHOOK_TOKEN>.
-    """
-    if not settings.suvvy_webhook_token:
+    provided_header = ""
+    if authorization and authorization.startswith("Bearer "):
+        provided_header = authorization.removeprefix("Bearer ").strip()
+    if provided_header and hmac.compare_digest(provided_header, expected):
         return
 
-    expected_header = f"Bearer {settings.suvvy_webhook_token}"
-    if authorization == expected_header:
-        return
-
-    if body_token and body_token.strip() == settings.suvvy_webhook_token:
+    if (
+        settings.suvvy_allow_body_token
+        and body_token
+        and hmac.compare_digest(body_token.strip(), expected)
+    ):
         return
 
     raise HTTPException(
@@ -107,7 +157,11 @@ def verify_suvvy_token(authorization: str | None, body_token: str | None = None)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "suvvy-tourvisor-bridge", "status": "ok", "version": "0.3.2"}
+    return {
+        "service": "suvvy-tourvisor-bridge",
+        "status": "ok",
+        "version": settings.service_version,
+    }
 
 
 @app.get("/ping")
@@ -120,44 +174,42 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ready")
+async def ready() -> dict[str, str | int]:
+    return {
+        "status": "ok",
+        "version": settings.service_version,
+        "git_commit": settings.git_commit_sha,
+        "whitelist_version": operator_policy.version,
+        "whitelist_hash": operator_policy.short_hash,
+        "allowed_operator_count": operator_policy.active_count,
+    }
 
 
-@app.api_route("/suvvy-debug", methods=["GET", "POST", "HEAD", "OPTIONS"], name="suvvy_debug")
-@app.api_route("/debug", methods=["GET", "POST", "HEAD", "OPTIONS"], include_in_schema=False)
-@app.api_route("/tour-search-fast", methods=["GET", "POST", "HEAD", "OPTIONS"], include_in_schema=False)
-async def suvvy_debug_endpoint(request: Request) -> Response:
-    """Ultra-fast webhook diagnostics endpoint for Suvvy.
+if settings.enable_debug_endpoints:
 
-    It does not validate tokens and does not call Tourvisor. Use it only to prove
-    whether a Suvvy webhook reaches the Amvera FastAPI container.
-    """
-    if request.method == "HEAD":
-        return Response(status_code=200)
-
-    body_preview = ""
-    try:
-        raw = await request.body()
-        body_preview = raw[:500].decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        body_preview = "<unable to read body>"
-
-    logger.info(
-        "SUVVY_DEBUG_HIT method=%s path=%s body_preview=%s",
-        request.method,
-        request.url.path,
-        body_preview,
+    @app.api_route(
+        "/suvvy-debug",
+        methods=["GET", "POST", "HEAD"],
+        name="suvvy_debug",
+        include_in_schema=False,
     )
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "ok",
-            "found": True,
-            "client_text": "Диагностика успешна: Suvvy дошёл до Amvera. Вебхук работает, можно возвращать боевой URL поиска тура.",
-            "source": "amvera_fastapi_debug",
-            "method": request.method,
-            "path": request.url.path,
-        },
-    )
+    async def suvvy_debug_endpoint(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        verify_suvvy_token(authorization)
+        if request.method == "HEAD":
+            return Response(status_code=200)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "ok",
+                "request_id": get_request_id(),
+                "method": request.method,
+                "path": request.url.path,
+            },
+        )
 
 
 async def run_tour_search(
@@ -167,22 +219,41 @@ async def run_tour_search(
     compact_for_suvvy: bool = False,
     room_images_per_tour: int = 2,
 ) -> BotResponse:
+    request_id = get_request_id()
     try:
-        client = TourvisorClient()
+        request = validate_and_normalize_search_request(request)
+        logger.info(
+            "SEARCH_VALIDATED request_id=%s chat_id=%s budget=%s nights_from=%s nights_to=%s "
+            "policy_version=%s policy_hash=%s allowed_count=%s",
+            request_id,
+            safe_chat_id(request.chat_id),
+            request.budget,
+            request.nights_from,
+            request.nights_to,
+            operator_policy.version,
+            operator_policy.short_hash,
+            operator_policy.active_count,
+        )
+
+        client = TourvisorClient(policy=operator_policy)
         search_id, tours = await client.search_tours(request)
-        selected = select_best_tours(tours, request, limit=max(tour_limit, 1))
-        # The tour-search result does not reliably contain a hotel cover image.
-        # Fetch the official hotel description and take its first image as the
-        # selling/cover photo, then enrich the chosen room separately.
+        selected = select_best_tours(
+            tours,
+            request,
+            limit=max(tour_limit, 1),
+            policy=operator_policy,
+        )
         selected = await client.enrich_tours_with_hotel_details(selected)
         selected = await client.enrich_tours_with_room_details(selected)
         for tour in selected:
             normalize_tour_media(tour)
 
-        # For Suvvy, keep /tour-search short but include direct image URLs inside client_text.
-        # When Suvvy's structured answers are enabled, direct image links can be rendered as images.
         if request.image_mode == "none":
-            client_text = format_tours_for_client(selected, request, include_image_links=False)
+            client_text = format_tours_for_client(
+                selected,
+                request,
+                include_image_links=False,
+            )
         elif compact_for_suvvy and request.image_mode in {"structured", "links_in_text"}:
             client_text = format_tours_compact_for_suvvy(
                 selected,
@@ -196,13 +267,25 @@ async def run_tour_search(
                 images_per_tour=room_images_per_tour,
             )
         else:
-            client_text = format_tours_for_client(selected, request, include_image_links=False)
+            client_text = format_tours_for_client(
+                selected,
+                request,
+                include_image_links=False,
+            )
+
+        pending_preferences = unverified_preferences(request)
+        if selected and pending_preferences:
+            client_text += (
+                "\n\nДополнительные пожелания по отелю и пляжу переданы "
+                "менеджеру для обязательной проверки."
+            )
 
         url_count = len(re.findall(r"https?://\S+", client_text))
-        # Rough, deliberately conservative estimate only; the exact tokenizer is controlled by Suvvy.
         approx_output_tokens = math.ceil(len(client_text) / 2.5)
         logger.info(
-            "SUVVY_RESPONSE_METRICS compact=%s tours=%s chars=%s urls=%s approx_output_tokens=%s",
+            "SUVVY_RESPONSE_METRICS request_id=%s compact=%s tours=%s chars=%s "
+            "urls=%s approx_output_tokens=%s",
+            request_id,
             compact_for_suvvy,
             len(selected),
             len(client_text),
@@ -210,45 +293,97 @@ async def run_tour_search(
             approx_output_tokens,
         )
 
-        images = [] if request.image_mode == "none" else image_assets_from_tours(
-            selected,
-            limit_per_tour=room_images_per_tour,
+        images = (
+            []
+            if request.image_mode == "none"
+            else image_assets_from_tours(
+                selected,
+                limit_per_tour=room_images_per_tour,
+            )
         )
         cards = cards_from_tours(selected)
-        messages = [] if request.image_mode == "none" else message_blocks_from_tours(client_text, selected)
+        messages = (
+            []
+            if request.image_mode == "none"
+            else message_blocks_from_tours(client_text, selected)
+        )
 
         return BotResponse(
             status="ok",
             found=bool(selected),
+            reason="FOUND" if selected else "NO_MATCHES",
+            request_id=request_id,
             client_text=client_text,
             tours_count=len(selected),
             search_id=search_id,
+            whitelist_version=operator_policy.version,
+            whitelist_hash=operator_policy.short_hash,
+            unverified_preferences=pending_preferences,
             tours=[tour.public_dict() for tour in selected],
             cards=cards,
             images=images,
             messages=messages,
             image_delivery_note=IMAGE_DELIVERY_NOTE if images else None,
         )
-    except UserInputError as exc:
+    except SearchInputError as exc:
         return BotResponse(
-            status="ok",
+            status="needs_clarification",
             found=False,
-            client_text=str(exc),
+            reason=exc.reason,
+            request_id=request_id,
+            client_text=exc.client_text,
             tours_count=0,
             search_id=None,
+            whitelist_version=operator_policy.version,
+            whitelist_hash=operator_policy.short_hash,
+            unverified_preferences=unverified_preferences(request),
             image_delivery_note=None,
         )
-    except Exception:  # noqa: BLE001 - we return safe text to Suvvy instead of raw stack trace
-        logger.exception("Tour search failed")
+    except OperatorPolicyConfigurationError as exc:
+        logger.error("CONFIGURATION_ERROR request_id=%s type=%s", request_id, type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "error",
+                "found": False,
+                "reason": "CONFIGURATION_ERROR",
+                "request_id": request_id,
+            },
+        ) from exc
+    except httpx.TimeoutException:
+        logger.exception("Tourvisor timeout request_id=%s", request_id)
         return BotResponse(
             status="error",
             found=False,
+            reason="UPSTREAM_TIMEOUT",
+            request_id=request_id,
+            client_text=(
+                "Сейчас Tourvisor отвечает дольше обычного. "
+                "Я зафиксировала Ваш запрос — менеджер свяжется с Вами в ближайшее время."
+            ),
+            tours_count=0,
+            search_id=None,
+            whitelist_version=operator_policy.version,
+            whitelist_hash=operator_policy.short_hash,
+            unverified_preferences=unverified_preferences(request),
+            image_delivery_note=None,
+        )
+    except Exception:
+        logger.exception("Tour search failed request_id=%s", request_id)
+        return BotResponse(
+            status="error",
+            found=False,
+            reason="UPSTREAM_ERROR",
+            request_id=request_id,
             client_text=(
                 "Сейчас не удалось получить автоматическую подборку. "
                 "Я зафиксировала Ваш запрос — менеджер свяжется с Вами в ближайшее время."
             ),
             tours_count=0,
             search_id=None,
+            whitelist_version=operator_policy.version,
+            whitelist_hash=operator_policy.short_hash,
+            unverified_preferences=unverified_preferences(request),
             image_delivery_note=None,
         )
 
@@ -262,19 +397,17 @@ async def authenticated_tour_search(
 
 
 def to_short_response(response: BotResponse) -> ShortBotResponse:
-    """Return only fields that Suvvy needs.
-
-    Suvvy webhook actions have a maximum response length. The full response
-    contains tours/cards/images/messages and can exceed that limit before
-    JSONPath extraction happens. Keep /tour-search tiny and put the large
-    payload on /tour-search-full for Swagger/debug/future image delivery.
-    """
     return ShortBotResponse(
         status=response.status,
         found=response.found,
+        reason=response.reason,
+        request_id=response.request_id,
         client_text=response.client_text,
         tours_count=response.tours_count,
         search_id=response.search_id,
+        whitelist_version=response.whitelist_version,
+        whitelist_hash=response.whitelist_hash,
+        unverified_preferences=response.unverified_preferences,
     )
 
 
@@ -292,69 +425,49 @@ async def authenticated_tour_search_short(
     return to_short_response(response)
 
 
-@app.post("/", response_model=ShortBotResponse)
-async def suvvy_tour_search_root(
-    request: TourSearchRequest,
-    authorization: str | None = Header(default=None),
-) -> ShortBotResponse:
-    """Root webhook alias for platforms/proxies that fail on nested paths."""
-    logger.info("Received Suvvy tour-search webhook on root alias /")
-    return await authenticated_tour_search_short(request, authorization)
-
-
 @app.post("/tour-search", response_model=ShortBotResponse)
 async def suvvy_tour_search_short(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
 ) -> ShortBotResponse:
-    """Short webhook alias."""
-    logger.info("Received Suvvy tour-search webhook on /tour-search")
     return await authenticated_tour_search_short(request, authorization)
 
 
-@app.post("/suvvy", response_model=ShortBotResponse)
+@app.post("/", response_model=ShortBotResponse, include_in_schema=False)
+async def suvvy_tour_search_root(
+    request: TourSearchRequest,
+    authorization: str | None = Header(default=None),
+) -> ShortBotResponse:
+    return await authenticated_tour_search_short(request, authorization)
+
+
+@app.post("/suvvy", response_model=ShortBotResponse, include_in_schema=False)
 async def suvvy_tour_search_suvvy_alias(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
 ) -> ShortBotResponse:
-    """Simple webhook alias for Suvvy UI."""
-    logger.info("Received Suvvy tour-search webhook on /suvvy")
     return await authenticated_tour_search_short(request, authorization)
 
 
-@app.post("/api/suvvy/tour-search", response_model=ShortBotResponse)
+@app.post("/api/suvvy/tour-search", response_model=ShortBotResponse, include_in_schema=False)
 async def suvvy_tour_search(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
 ) -> ShortBotResponse:
-    logger.info("Received Suvvy tour-search webhook on /api/suvvy/tour-search")
     return await authenticated_tour_search_short(request, authorization)
 
 
-@app.post("/tour-search-full", response_model=BotResponse)
+@app.post("/tour-search-full", response_model=BotResponse, include_in_schema=False)
 async def suvvy_tour_search_full(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
 ) -> BotResponse:
-    """Full payload endpoint for Swagger/debug/future image mapping. Do not use in Suvvy text webhook."""
-    logger.info("Received FULL Suvvy tour-search webhook on /tour-search-full")
     return await authenticated_tour_search(request, authorization)
 
 
-@app.post("/api/suvvy/tour-search-full", response_model=BotResponse)
+@app.post("/api/suvvy/tour-search-full", response_model=BotResponse, include_in_schema=False)
 async def suvvy_tour_search_full_api(
     request: TourSearchRequest,
     authorization: str | None = Header(default=None),
 ) -> BotResponse:
-    """Full payload endpoint for Swagger/debug/future image mapping. Do not use in Suvvy text webhook."""
-    logger.info("Received FULL Suvvy tour-search webhook on /api/suvvy/tour-search-full")
     return await authenticated_tour_search(request, authorization)
-
-
-@app.get("/api/suvvy/tour-search")
-async def suvvy_tour_search_diagnostic() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "message": "Use POST with JSON body for tour search.",
-        "recommended_suvvy_url": "/ or /tour-search if nested path is blocked by proxy",
-    }

@@ -1,2 +1,2 @@
-stakeholder_name,tourvisor_name,tourvisor_id,enabled,comment
-PLACEHOLDER,PLACEHOLDER,,false,Заполнить после маппинга со справочником Tourvisor
+stakeholder_name,tourvisor_name,tourvisor_id,status,aliases,comment
+PLACEHOLDER,PLACEHOLDER,,approved_to_contract,,Перенести в JSON только после подтверждения бизнес-статуса
