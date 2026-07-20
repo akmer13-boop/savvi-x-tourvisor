@@ -1,5 +1,7 @@
 from app.config import settings
 from app.models import TourOption, TourSearchRequest
+from app.operator_policy import OperatorPolicy
+from app.runtime import operator_policy
 
 
 def score_tour(tour: TourOption, request: TourSearchRequest) -> int:
@@ -9,8 +11,6 @@ def score_tour(tour: TourOption, request: TourSearchRequest) -> int:
     if request.budget and tour.price:
         if tour.price <= request.budget:
             score += 40
-        elif tour.price <= request.budget * 1.1:
-            score += 10
         else:
             score -= 40
 
@@ -39,21 +39,28 @@ def score_tour(tour: TourOption, request: TourSearchRequest) -> int:
     return score
 
 
-def select_best_tours(tours: list[TourOption], request: TourSearchRequest, limit: int = 5) -> list[TourOption]:
+def select_best_tours(
+    tours: list[TourOption],
+    request: TourSearchRequest,
+    limit: int = 5,
+    *,
+    policy: OperatorPolicy | None = None,
+) -> list[TourOption]:
+    policy = policy or operator_policy
+
     # Stakeholder rule: only hotels with an explicit rating >= configured threshold.
     min_rating = settings.tourvisor_min_hotel_rating
     tours = [tour for tour in tours if tour.rating is not None and tour.rating >= min_rating]
 
-    if settings.operator_whitelist_active:
-        allowed = settings.allowed_operator_ids
-        tours = [tour for tour in tours if tour.operator_id in allowed]
+    if policy.enforced:
+        tours = [tour for tour in tours if tour.operator_id in policy.active_ids]
 
     if request.budget:
-        # Allow +10% because the exact tourist budget is often flexible.
-        tours = [tour for tour in tours if not tour.price or tour.price <= int(request.budget * 1.1)]
+        # The budget is a strict upper bound. Unknown prices cannot be offered.
+        tours = [tour for tour in tours if tour.price is not None and tour.price <= request.budget]
 
     if request.hotel_stars:
-        tours = [tour for tour in tours if not tour.stars or tour.stars >= request.hotel_stars]
+        tours = [tour for tour in tours if tour.stars is not None and tour.stars >= request.hotel_stars]
 
     sorted_tours = sorted(tours, key=lambda item: score_tour(item, request), reverse=True)
     return sorted_tours[:limit]

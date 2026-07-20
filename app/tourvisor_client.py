@@ -10,12 +10,19 @@ import httpx
 from app.config import settings
 from app.media import absolute_url, normalize_tour_media
 from app.models import TourOption, TourSearchRequest
+from app.observability import get_request_id
+from app.operator_policy import OperatorPolicy, OperatorPolicyConfigurationError
+from app.runtime import operator_policy
+from app.validation import SearchInputError, validate_and_normalize_search_request
 
 logger = logging.getLogger(__name__)
 
 
-class UserInputError(ValueError):
+class UserInputError(SearchInputError):
     """The request is missing data required for Tourvisor search."""
+
+    def __init__(self, client_text: str, reason: str = "NEEDS_CLARIFICATION") -> None:
+        super().__init__(reason, client_text)
 
 
 class TourvisorClient:
@@ -28,20 +35,21 @@ class TourvisorClient:
     4. Read current results: GET /search/api/v1/tours/search/{searchId}.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, policy: OperatorPolicy | None = None) -> None:
         self.base_url = settings.tourvisor_api_base_url.rstrip("/")
         self.jwt = settings.effective_tourvisor_jwt
+        self.operator_policy = policy or operator_policy
         self.headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.jwt}",
         }
 
     async def search_tours(self, request: TourSearchRequest) -> tuple[str, list[TourOption]]:
+        request = validate_and_normalize_search_request(request)
         if settings.mock_tourvisor:
             return str(uuid.uuid4()), self._mock_tours(request)
 
         self._validate_config()
-        self._validate_request(request)
 
         async with httpx.AsyncClient(timeout=settings.tourvisor_timeout_seconds) as client:
             departure = await self._resolve_departure(client, request.departure_city)
@@ -174,25 +182,10 @@ class TourvisorClient:
             raise RuntimeError("TOURVISOR_JWT is not configured")
         if not self.base_url:
             raise RuntimeError("TOURVISOR_API_BASE_URL is not configured")
-
-    def _validate_request(self, request: TourSearchRequest) -> None:
-        missing: list[str] = []
-        if not request.date_from:
-            missing.append("дату начала вылета")
-        if not request.date_to:
-            missing.append("дату окончания диапазона")
-        if not request.nights_from:
-            missing.append("количество ночей от")
-        if not request.nights_to:
-            missing.append("количество ночей до")
-        if request.children and len(request.children_ages) < request.children:
-            missing.append("возраст каждого ребёнка")
-
-        if missing:
-            raise UserInputError("Для поиска нужно уточнить: " + ", ".join(missing) + ".")
-
-        if request.nights_from and request.nights_to and request.nights_to - request.nights_from > 10:
-            raise UserInputError("Диапазон ночей в Tourvisor должен быть не больше 10. Уточните более узкий диапазон.")
+        if not self.operator_policy.enforced or not self.operator_policy.active_ids:
+            raise OperatorPolicyConfigurationError(
+                "A non-empty active_contract operator policy is required"
+            )
 
     async def _get(self, client: httpx.AsyncClient, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
@@ -200,8 +193,12 @@ class TourvisorClient:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:1000]
-            logger.error("Tourvisor API error %s for %s: %s", exc.response.status_code, path, body)
+            logger.error(
+                "Tourvisor API error request_id=%s status=%s path=%s",
+                get_request_id(),
+                exc.response.status_code,
+                path,
+            )
             raise RuntimeError(f"Tourvisor API error {exc.response.status_code}") from exc
         return response.json()
 
@@ -266,11 +263,18 @@ class TourvisorClient:
             "meal": meal_id,
         }
 
-        if settings.operator_whitelist_active:
-            params["operatorIds"] = sorted(settings.allowed_operator_ids)
+        if self.operator_policy.enforced:
+            if not self.operator_policy.active_ids:
+                raise OperatorPolicyConfigurationError(
+                    "The active_contract operator list is empty"
+                )
+            # httpx serializes list values as repeated query parameters. A
+            # contract test locks this down until the live Tourvisor contract
+            # can be verified with an explicitly approved request.
+            params["operatorIds"] = sorted(self.operator_policy.active_ids)
 
         if request.children_ages:
-            params["childs"] = request.children_ages[:3]
+            params["childs"] = request.children_ages
         if region_id:
             params["regionIds"] = [region_id]
         return params
@@ -293,7 +297,14 @@ class TourvisorClient:
 
             progress = int(status_data.get("progress") or 0)
             status = str(status_data.get("status") or "").lower()
-            logger.info("Tourvisor search %s status=%s progress=%s attempt=%s", search_id, status, progress, attempt + 1)
+            logger.info(
+                "TOURVISOR_STATUS request_id=%s search_id=%s status=%s progress=%s attempt=%s",
+                get_request_id(),
+                search_id,
+                status,
+                progress,
+                attempt + 1,
+            )
             if progress >= 100 or status in {"done", "complete", "completed", "finished", "finish"}:
                 break
 
@@ -304,6 +315,7 @@ class TourvisorClient:
 
         tours: list[TourOption] = []
         seen_hotels: set[int] = set()
+        dropped_disallowed = 0
 
         for hotel in data:
             if not isinstance(hotel, dict):
@@ -324,7 +336,8 @@ class TourvisorClient:
                     continue
                 operator = tour.get("operator") or {}
                 operator_id = _to_int(operator.get("id")) if isinstance(operator, dict) else None
-                if settings.operator_whitelist_active and operator_id not in settings.allowed_operator_ids:
+                if self.operator_policy.enforced and operator_id not in self.operator_policy.active_ids:
+                    dropped_disallowed += 1
                     continue
 
                 hotel_id = _to_int(hotel.get("id"))
@@ -337,6 +350,16 @@ class TourvisorClient:
                 tours.append(option)
                 break
 
+        logger.info(
+            "OPERATOR_FILTER request_id=%s policy_version=%s policy_hash=%s "
+            "allowed_count=%s dropped_disallowed=%s accepted=%s",
+            get_request_id(),
+            self.operator_policy.version,
+            self.operator_policy.short_hash,
+            self.operator_policy.active_count,
+            dropped_disallowed,
+            len(tours),
+        )
         return tours
 
     def _parse_tour_option(self, hotel: dict[str, Any], tour: dict[str, Any], request: TourSearchRequest) -> TourOption:

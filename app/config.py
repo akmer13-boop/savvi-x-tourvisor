@@ -6,9 +6,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment variables."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
+    app_environment: str = "development"
+    service_version: str = "0.4.0"
+    git_commit_sha: str = "unknown"
+
+    # Suvvy webhook authentication. Body-token support is transitional only.
     suvvy_webhook_token: str = ""
+    suvvy_allow_body_token: bool = True
 
     # Tourvisor Search API
     tourvisor_api_base_url: str = "https://api.tourvisor.ru"
@@ -19,10 +29,11 @@ class Settings(BaseSettings):
     tourvisor_poll_interval_seconds: float = 2.0
     tourvisor_results_limit: int = 25
 
-    # Business filters
+    # Business filters and fail-closed operator policy.
+    operator_registry_path: str = "config/operator_registry.json"
     tourvisor_min_hotel_rating: float = 4.0
-    tourvisor_operator_whitelist_enabled: bool = False
-    tourvisor_allowed_operator_ids: str = ""
+    max_departure_window_days: int = 7
+    max_nights_range: int = 10
 
     # Media
     tourvisor_enable_hotel_images: bool = True
@@ -35,6 +46,10 @@ class Settings(BaseSettings):
     suvvy_tours_limit: int = 3
     suvvy_room_images_per_tour: int = 1
     suvvy_compact_output: bool = True
+
+    # Production hardening.
+    enable_debug_endpoints: bool = False
+    expose_api_docs: bool = False
 
     # Backward-compatible names from the first MVP build.
     tourvisor_api_key: str = ""
@@ -49,23 +64,24 @@ class Settings(BaseSettings):
         return self.tourvisor_jwt or self.tourvisor_api_key
 
     @property
-    def allowed_operator_ids(self) -> set[int]:
-        result: set[int] = set()
-        for raw in self.tourvisor_allowed_operator_ids.replace(";", ",").split(","):
-            value = raw.strip()
-            if not value:
-                continue
-            try:
-                result.add(int(value))
-            except ValueError:
-                continue
-        return result
+    def operator_policy_required(self) -> bool:
+        """Every real Tourvisor request must use a non-empty active-contract list."""
+        return not self.mock_tourvisor
 
     @property
-    def operator_whitelist_active(self) -> bool:
-        # Fail-open while the stakeholder mapping is not ready: an enabled flag
-        # without IDs must not remove all tours from production.
-        return self.tourvisor_operator_whitelist_enabled and bool(self.allowed_operator_ids)
+    def production_mode(self) -> bool:
+        return self.app_environment.strip().lower() == "production"
+
+    def validate_runtime_configuration(self, active_operator_count: int) -> None:
+        """Fail before serving traffic when a real integration is unsafe."""
+        if self.mock_tourvisor:
+            return
+        if not self.effective_tourvisor_jwt:
+            raise ValueError("TOURVISOR_JWT is required when MOCK_TOURVISOR=false")
+        if not self.suvvy_webhook_token:
+            raise ValueError("SUVVY_WEBHOOK_TOKEN is required when MOCK_TOURVISOR=false")
+        if active_operator_count <= 0:
+            raise ValueError("At least one active_contract operator is required when MOCK_TOURVISOR=false")
 
 
 settings = Settings()
