@@ -1,18 +1,22 @@
+from app.budget import BudgetPolicy
 from app.config import settings
 from app.models import TourOption, TourSearchRequest
 from app.operator_policy import OperatorPolicy
 from app.runtime import operator_policy
 
 
-def score_tour(tour: TourOption, request: TourSearchRequest) -> int:
+def score_tour(
+    tour: TourOption,
+    request: TourSearchRequest,
+    *,
+    budget_policy: BudgetPolicy | None = None,
+) -> int:
     """MVP scoring after mandatory business filters."""
     score = 0
+    budget_policy = budget_policy or BudgetPolicy.from_request(request)
 
-    if request.budget and tour.price:
-        if tour.price <= request.budget:
-            score += 40
-        else:
-            score -= 40
+    if budget_policy.allows(tour.price):
+        score += 40
 
     if request.meal and tour.meal:
         if request.meal.lower() in tour.meal.lower() or tour.meal.lower() in request.meal.lower():
@@ -47,6 +51,7 @@ def select_best_tours(
     policy: OperatorPolicy | None = None,
 ) -> list[TourOption]:
     policy = policy or operator_policy
+    budget_policy = BudgetPolicy.from_request(request)
 
     # Stakeholder rule: only hotels with an explicit rating >= configured threshold.
     min_rating = settings.tourvisor_min_hotel_rating
@@ -55,12 +60,17 @@ def select_best_tours(
     if policy.enforced:
         tours = [tour for tour in tours if tour.operator_id in policy.active_ids]
 
-    if request.budget:
-        # The budget is a strict upper bound. Unknown prices cannot be offered.
-        tours = [tour for tour in tours if tour.price is not None and tour.price <= request.budget]
+    tours = [tour for tour in tours if budget_policy.allows(tour.price)]
 
     if request.hotel_stars:
         tours = [tour for tour in tours if tour.stars is not None and tour.stars >= request.hotel_stars]
 
-    sorted_tours = sorted(tours, key=lambda item: score_tour(item, request), reverse=True)
+    sorted_tours = sorted(
+        tours,
+        key=lambda item: (
+            budget_policy.priority_bucket(item.price),
+            score_tour(item, request, budget_policy=budget_policy),
+        ),
+        reverse=True,
+    )
     return sorted_tours[:limit]

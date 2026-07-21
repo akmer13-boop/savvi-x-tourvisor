@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class Settings(BaseSettings):
@@ -13,12 +14,14 @@ class Settings(BaseSettings):
     )
 
     app_environment: str = "development"
-    service_version: str = "0.4.0"
+    service_version: str = "0.5.0"
+    api_contract_version: str = "2026-07-21.2"
     git_commit_sha: str = "unknown"
 
     # Suvvy webhook authentication. Body-token support is transitional only.
     suvvy_webhook_token: str = ""
     suvvy_allow_body_token: bool = True
+    suvvy_previous_webhook_token: str = ""
 
     # Tourvisor Search API
     tourvisor_api_base_url: str = "https://api.tourvisor.ru"
@@ -34,6 +37,25 @@ class Settings(BaseSettings):
     tourvisor_min_hotel_rating: float = 4.0
     max_departure_window_days: int = 7
     max_nights_range: int = 10
+    business_timezone: str = "Europe/Moscow"
+
+    # Per-chat idempotency and search limits. The persistent Amvera mount is
+    # /data; the guard remains disabled during the backward-compatible bot
+    # migration and is then enabled explicitly.
+    search_guard_enabled: bool = False
+    search_guard_db_path: str = "/data/search_guard.sqlite3"
+    search_guard_hmac_secret: str = ""
+    search_guard_namespace: str = "suvvy-tourvisor"
+    search_guard_ttl_seconds: int = 72 * 60 * 60
+    search_guard_max_searches: int = 2
+    search_result_replay_ttl_seconds: int = 45
+    search_guard_prune_interval_seconds: int = 15
+    search_guard_persistence_verified: bool = False
+
+    # This stays deliberately unverified until an approved Tourvisor contract
+    # check confirms priceFrom plus result pagination/sorting semantics.
+    tourvisor_api_contract_version: str = "unverified"
+    tourvisor_price_from_enabled: bool = False
 
     # Media
     tourvisor_enable_hotel_images: bool = True
@@ -74,6 +96,52 @@ class Settings(BaseSettings):
 
     def validate_runtime_configuration(self, active_operator_count: int) -> None:
         """Fail before serving traffic when a real integration is unsafe."""
+        try:
+            ZoneInfo(self.business_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("BUSINESS_TIMEZONE must be a valid IANA timezone") from exc
+        if self.tourvisor_price_from_enabled and self.tourvisor_api_contract_version.strip().lower() in {
+            "",
+            "unknown",
+            "unverified",
+        }:
+            raise ValueError(
+                "TOURVISOR_API_CONTRACT_VERSION must be verified before enabling priceFrom"
+            )
+        if self.production_mode:
+            if self.mock_tourvisor:
+                raise ValueError("MOCK_TOURVISOR must be false in production")
+            if self.enable_debug_endpoints or self.expose_api_docs:
+                raise ValueError("Debug endpoints and API docs must be disabled in production")
+            if self.git_commit_sha.strip().lower() in {"", "unknown"}:
+                raise ValueError("GIT_COMMIT_SHA must identify the deployed commit in production")
+        if self.search_guard_enabled:
+            if not self.search_guard_hmac_secret:
+                raise ValueError("SEARCH_GUARD_HMAC_SECRET is required when search guard is enabled")
+            if self.search_guard_ttl_seconds != 72 * 60 * 60:
+                raise ValueError("SEARCH_GUARD_TTL_SECONDS must be exactly 259200")
+            if self.search_guard_max_searches != 2:
+                raise ValueError("SEARCH_GUARD_MAX_SEARCHES must be exactly 2")
+            if not 0 < self.search_result_replay_ttl_seconds <= 60:
+                raise ValueError(
+                    "SEARCH_RESULT_REPLAY_TTL_SECONDS must be between 1 and 60"
+                )
+            if not 0 < self.search_guard_prune_interval_seconds <= 60:
+                raise ValueError(
+                    "SEARCH_GUARD_PRUNE_INTERVAL_SECONDS must be between 1 and 60"
+                )
+            if (
+                self.search_result_replay_ttl_seconds
+                + self.search_guard_prune_interval_seconds
+                > 60
+            ):
+                raise ValueError(
+                    "Replay TTL plus prune interval must not exceed 60 seconds"
+                )
+            if not self.search_guard_persistence_verified:
+                raise ValueError(
+                    "SEARCH_GUARD_PERSISTENCE_VERIFIED must be true after a restart persistence check"
+                )
         if self.mock_tourvisor:
             return
         if not self.effective_tourvisor_jwt:

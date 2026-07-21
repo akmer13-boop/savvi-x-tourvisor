@@ -1,8 +1,9 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, "codex/**"]
   pull_request:
 
 permissions:
@@ -21,7 +22,7 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: ruff check app tests scripts
       - run: python -m unittest discover -s tests -v
-      - run: python -m compileall -q app
+      - run: python -m compileall -q app tests scripts
       - run: python scripts/check_secrets.py
 
   docker:
