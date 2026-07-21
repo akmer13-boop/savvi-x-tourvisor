@@ -1,35 +1,64 @@
 from __future__ import annotations
 
-from datetime import date
+import re
+import unicodedata
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
+from app.budget import BudgetPolicy, SearchInputError
+from app.budget import normalize_budget_rub as _normalize_budget_rub
 from app.config import settings
 from app.models import TourSearchRequest
 
 
-class SearchInputError(ValueError):
-    """A client-visible validation problem that must not call Tourvisor."""
+MANAGER_REQUIRED_TEXT = (
+    "Для этого запроса потребуется помощь менеджера. "
+    "Я зафиксировала Ваш запрос — менеджер свяжется с Вами в ближайшее время."
+)
 
-    def __init__(self, reason: str, client_text: str) -> None:
+
+class ManagerRoutingRequired(ValueError):
+    """A valid request that must be handled by a human without Tourvisor."""
+
+    def __init__(self, reason: str, client_text: str = MANAGER_REQUIRED_TEXT) -> None:
         super().__init__(client_text)
         self.reason = reason
         self.client_text = client_text
 
 
-def normalize_budget_rub(value: int | None) -> int:
-    """Normalize the total package budget and reject ambiguous ruble values."""
-    if value is None or value <= 0:
-        raise SearchInputError(
-            "INVALID_BUDGET",
-            "Уточните общий бюджет путёвки в рублях.",
-        )
-    if 50 <= value <= 999:
-        return value * 1_000
-    if value >= 50_000:
-        return value
-    raise SearchInputError(
-        "INVALID_BUDGET",
-        "Уточните общий бюджет путёвки в рублях, например 300 000 или 500 000.",
+def _normalized_words(value: str | None) -> set[str]:
+    normalized = unicodedata.normalize("NFKC", str(value or "").lower().replace("ё", "е"))
+    return set(re.sub(r"[^a-zа-я0-9]+", " ", normalized).split())
+
+
+def _validate_blocked_destination(request: TourSearchRequest) -> None:
+    destination_words = _normalized_words(request.country) | _normalized_words(
+        request.resort
     )
+    if destination_words & {
+        "китай",
+        "китайская",
+        "кнр",
+        "china",
+        "chinese",
+        "prc",
+        "cn",
+        "chn",
+        "kitai",
+        "kitay",
+        "zhongguo",
+        "хайнань",
+        "hainan",
+        "санья",
+        "sanya",
+        "sania",
+    }:
+        raise ManagerRoutingRequired("DESTINATION_BLOCKED")
+
+
+def normalize_budget_rub(value: int | None) -> int:
+    """Backward-compatible import path for callers of the 0.4 contract."""
+    return _normalize_budget_rub(value)
 
 
 def _parse_iso_date(value: str | None, field_name: str) -> date:
@@ -47,8 +76,14 @@ def _parse_iso_date(value: str | None, field_name: str) -> date:
         ) from exc
 
 
+def _business_today() -> date:
+    return datetime.now(ZoneInfo(settings.business_timezone)).date()
+
+
 def validate_and_normalize_search_request(request: TourSearchRequest) -> TourSearchRequest:
     """Return the canonical request that is safe to send to Tourvisor."""
+    _validate_blocked_destination(request)
+
     date_from = _parse_iso_date(request.date_from, "date_from")
     date_to = _parse_iso_date(request.date_to, "date_to")
     departure_span_days = (date_to - date_from).days
@@ -57,7 +92,7 @@ def validate_and_normalize_search_request(request: TourSearchRequest) -> TourSea
             "INVALID_DATES",
             "Конец диапазона вылета не может быть раньше его начала.",
         )
-    if date_from < date.today():
+    if date_from < _business_today():
         raise SearchInputError(
             "INVALID_DATES",
             "Дата начала вылета не может быть в прошлом.",
@@ -86,6 +121,8 @@ def validate_and_normalize_search_request(request: TourSearchRequest) -> TourSea
             f"{settings.max_nights_range} ночей.",
         )
 
+    if request.children > 3:
+        raise ManagerRoutingRequired("MANAGER_REQUIRED_TOO_MANY_CHILDREN")
     if request.children == 0 and request.children_ages:
         raise SearchInputError(
             "INVALID_TRAVELLERS",
@@ -102,12 +139,12 @@ def validate_and_normalize_search_request(request: TourSearchRequest) -> TourSea
             "Возраст каждого ребёнка должен быть указан полным числом лет от 0 до 17.",
         )
 
-    budget = normalize_budget_rub(request.budget)
+    budget_policy = BudgetPolicy.from_request(request)
     return request.model_copy(
         update={
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
-            "budget": budget,
+            **budget_policy.request_updates(),
         }
     )
 

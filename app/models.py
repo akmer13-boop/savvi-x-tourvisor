@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TourSearchRequest(BaseModel):
@@ -13,9 +13,25 @@ class TourSearchRequest(BaseModel):
     nights_from: int | None = Field(default=None, ge=1)
     nights_to: int | None = Field(default=None, ge=1)
     adults: int = Field(default=2, ge=1)
-    children: int = Field(default=0, ge=0, le=3)
+    # Values above three are routed to a manager by business validation so the
+    # bot receives a controlled HTTP 200 response instead of a schema 422.
+    children: int = Field(default=0, ge=0)
     children_ages: list[int] = Field(default_factory=list)
-    budget: int | None = Field(default=None, ge=0, description="Бюджет в рублях")
+    budget: int | None = Field(
+        default=None,
+        ge=0,
+        description="Устаревший бюджет «до» в рублях; используйте новый бюджетный контракт",
+    )
+    budget_type: Literal["max", "min", "approx", "range", "unknown"] | None = Field(
+        default=None,
+        description="Семантика бюджета",
+    )
+    budget_from: int | None = Field(default=None, ge=0, description="Нижняя граница бюджета")
+    budget_to: int | None = Field(
+        default=None,
+        ge=0,
+        description="Верхняя граница или ориентир для approximate-бюджета",
+    )
     meal: str | None = Field(default=None, description="Питание")
     hotel_stars: int | None = Field(default=None, ge=1, le=5)
     hotel_preferences: str | None = None
@@ -23,6 +39,10 @@ class TourSearchRequest(BaseModel):
     client_name: str | None = None
     client_phone: str | None = None
     chat_id: str | None = Field(default=None, description="ID диалога в Suvvy/канале, если доступен")
+    refresh_requested: bool = Field(
+        default=False,
+        description="Клиент явно попросил получить свежие цены повторно",
+    )
     source: str | None = Field(default=None, description="Источник диалога/лида, если доступен")
     image_mode: Literal["structured", "links_in_text", "none"] = Field(
         default="structured",
@@ -47,7 +67,6 @@ class TourSearchRequest(BaseModel):
         "beach_preferences",
         "client_name",
         "client_phone",
-        "chat_id",
         "source",
         mode="before",
     )
@@ -55,6 +74,42 @@ class TourSearchRequest(BaseModel):
     def strip_optional_text(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.strip()
+        return value
+
+    @field_validator("chat_id", mode="before")
+    @classmethod
+    def normalize_chat_id(cls, value: Any) -> str | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            raise ValueError("chat_id must be a string or integer")
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        raise ValueError("chat_id must be a string or integer")
+
+    @field_validator("resort", "meal", mode="after")
+    @classmethod
+    def normalize_no_preference_placeholder(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.casefold().replace("ё", "е").split())
+        if normalized in {
+            "any",
+            "без разницы",
+            "любое",
+            "любое питание",
+            "любой",
+            "любой курорт",
+            "не важно",
+            "не знаю",
+            "не указано",
+            "неважно",
+            "нет предпочтений",
+        }:
+            return None
         return value
 
     @field_validator("children_ages", mode="before")
@@ -68,9 +123,9 @@ class TourSearchRequest(BaseModel):
             return [int(part.strip()) for part in value.replace(";", ",").split(",") if part.strip().isdigit()]
         return []
 
-    @field_validator("budget", mode="before")
+    @field_validator("budget", "budget_from", "budget_to", mode="before")
     @classmethod
-    def parse_budget(cls, value: Any) -> Any:
+    def parse_budget_amount(cls, value: Any) -> Any:
         if value is None or value == "":
             return None
         if isinstance(value, bool):
@@ -80,6 +135,13 @@ class TourSearchRequest(BaseModel):
             if not cleaned.isdigit():
                 raise ValueError("budget must be an integer")
             return int(cleaned)
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_client_operator_policy(cls, value: Any) -> Any:
+        if isinstance(value, dict) and ({"operatorIds", "operator_ids"} & value.keys()):
+            raise ValueError("operatorIds are controlled exclusively by the server")
         return value
 
 
@@ -145,6 +207,7 @@ class BotResponse(BaseModel):
     whitelist_version: str
     whitelist_hash: str
     unverified_preferences: list[str] = Field(default_factory=list)
+    reused: bool = False
     tours: list[dict[str, Any]] = Field(default_factory=list)
     cards: list[dict[str, Any]] = Field(default_factory=list, description="Карточки туров для маппинга в Suvvy")
     images: list[dict[str, Any]] = Field(default_factory=list, description="Фото отдельным массивом; URL уже полные https")
@@ -163,3 +226,4 @@ class ShortBotResponse(BaseModel):
     whitelist_version: str
     whitelist_hash: str
     unverified_preferences: list[str] = Field(default_factory=list)
+    reused: bool = False

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from contextvars import ContextVar, Token
+
+from app.config import settings
 
 
 _request_id: ContextVar[str] = ContextVar("request_id", default="unknown")
@@ -22,4 +25,13 @@ def get_request_id() -> str:
 def safe_chat_id(value: str | None) -> str:
     if not value:
         return "none"
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    secret = settings.search_guard_hmac_secret or settings.suvvy_webhook_token
+    if not secret:
+        # Never emit a reversible or cheaply enumerable identifier when the
+        # keyed pseudonymisation secret has not been configured.
+        return "present"
+    return hmac.new(
+        secret.encode("utf-8"),
+        value.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:12]

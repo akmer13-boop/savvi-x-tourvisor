@@ -3,10 +3,12 @@ import logging
 import re
 import unicodedata
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 
+from app.budget import BudgetPolicy
 from app.config import settings
 from app.media import absolute_url, normalize_tour_media
 from app.models import TourOption, TourSearchRequest
@@ -23,6 +25,10 @@ class UserInputError(SearchInputError):
 
     def __init__(self, client_text: str, reason: str = "NEEDS_CLARIFICATION") -> None:
         super().__init__(reason, client_text)
+
+
+class TourvisorContractConfigurationError(OperatorPolicyConfigurationError):
+    """A requested search mode is not enabled for the verified API contract."""
 
 
 class TourvisorClient:
@@ -44,12 +50,20 @@ class TourvisorClient:
             "Authorization": f"Bearer {self.jwt}",
         }
 
-    async def search_tours(self, request: TourSearchRequest) -> tuple[str, list[TourOption]]:
+    async def search_tours(
+        self,
+        request: TourSearchRequest,
+        *,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
+    ) -> tuple[str, list[TourOption]]:
         request = validate_and_normalize_search_request(request)
         if settings.mock_tourvisor:
+            if before_dispatch is not None:
+                await before_dispatch()
             return str(uuid.uuid4()), self._mock_tours(request)
 
         self._validate_config()
+        self._validate_budget_contract(request)
 
         async with httpx.AsyncClient(timeout=settings.tourvisor_timeout_seconds) as client:
             departure = await self._resolve_departure(client, request.departure_city)
@@ -72,6 +86,17 @@ class TourvisorClient:
                 meal_id=meal_id,
             )
 
+            logger.info(
+                "TOURVISOR_SEARCH_CONTRACT request_id=%s contract_version=%s "
+                "has_price_from=%s has_price_to=%s operator_count=%s",
+                get_request_id(),
+                settings.tourvisor_api_contract_version,
+                "priceFrom" in search_params,
+                "priceTo" in search_params,
+                len(search_params.get("operatorIds") or []),
+            )
+            if before_dispatch is not None:
+                await before_dispatch()
             search_response = await self._get(client, "/search/api/v1/tours/search", params=search_params)
             search_id = str(search_response.get("searchId") or "")
             if not search_id:
@@ -187,6 +212,19 @@ class TourvisorClient:
                 "A non-empty active_contract operator policy is required"
             )
 
+    @staticmethod
+    def _validate_budget_contract(request: TourSearchRequest) -> None:
+        budget_policy = BudgetPolicy.from_request(request)
+        contract_version = settings.tourvisor_api_contract_version.strip().lower()
+        contract_verified = contract_version not in {"", "unknown", "unverified"}
+        if (
+            budget_policy.budget_type in {"min", "approx", "range"}
+            and (not settings.tourvisor_price_from_enabled or not contract_verified)
+        ):
+            raise TourvisorContractConfigurationError(
+                "The requested budget mode is disabled until the Tourvisor price contract is verified"
+            )
+
     async def _get(self, client: httpx.AsyncClient, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
         response = await client.get(url, params=self._clean_params(params or {}), headers=self.headers)
@@ -224,18 +262,26 @@ class TourvisorClient:
             raise UserInputError(f"Не нашёл направление «{name}» для выбранного города вылета. Уточните страну.")
         return found
 
-    async def _resolve_region(self, client: httpx.AsyncClient, name: str, country_id: int) -> dict[str, Any] | None:
+    async def _resolve_region(self, client: httpx.AsyncClient, name: str, country_id: int) -> dict[str, Any]:
         items = await self._get(client, "/search/api/v1/regions", params={"countryId": country_id})
         found = _find_by_name(items, name)
         if not found:
-            logger.info("Region not found in Tourvisor dictionary: %s", name)
+            logger.info("Tourvisor region dictionary lookup returned no match")
+            raise UserInputError(
+                "Не удалось однозначно определить курорт. Уточните название курорта.",
+                reason="REGION_NOT_FOUND",
+            )
         return found
 
-    async def _resolve_meal(self, client: httpx.AsyncClient, name: str) -> dict[str, Any] | None:
+    async def _resolve_meal(self, client: httpx.AsyncClient, name: str) -> dict[str, Any]:
         items = await self._get(client, "/search/api/v1/meals")
         found = _find_meal(items, name)
         if not found:
-            logger.info("Meal not found in Tourvisor dictionary: %s", name)
+            logger.info("Tourvisor meal dictionary lookup returned no match")
+            raise UserInputError(
+                "Не удалось однозначно определить тип питания. Уточните питание.",
+                reason="MEAL_NOT_FOUND",
+            )
         return found
 
     def _build_search_params(
@@ -246,6 +292,9 @@ class TourvisorClient:
         region_id: int | None,
         meal_id: int | None,
     ) -> dict[str, Any]:
+        budget_policy = BudgetPolicy.from_request(request)
+        self._validate_budget_contract(request)
+
         params: dict[str, Any] = {
             "departureId": departure_id,
             "countryId": country_id,
@@ -257,7 +306,8 @@ class TourvisorClient:
             "currency": settings.tourvisor_currency,
             "onlyCharter": False,
             "onlyDirect": False,
-            "priceTo": request.budget,
+            "priceFrom": budget_policy.price_from,
+            "priceTo": budget_policy.price_to,
             "hotelCategory": request.hotel_stars,
             "hotelRating": 4,
             "meal": meal_id,
@@ -277,7 +327,7 @@ class TourvisorClient:
             params["childs"] = request.children_ages
         if region_id:
             params["regionIds"] = [region_id]
-        return params
+        return self._clean_params(params)
 
     async def _wait_for_results(self, client: httpx.AsyncClient, search_id: str) -> None:
         attempts = max(settings.tourvisor_poll_attempts, 1)
@@ -291,8 +341,12 @@ class TourvisorClient:
                     f"/search/api/v1/tours/search/{search_id}/status",
                     params={"operatorStatus": False},
                 )
-            except Exception:  # noqa: BLE001 - results endpoint may still have partial data
-                logger.exception("Unable to read Tourvisor search status")
+            except Exception as exc:  # noqa: BLE001 - partial results may still exist
+                logger.warning(
+                    "Unable to read Tourvisor search status request_id=%s error_type=%s",
+                    get_request_id(),
+                    type(exc).__name__,
+                )
                 continue
 
             progress = int(status_data.get("progress") or 0)
@@ -316,6 +370,8 @@ class TourvisorClient:
         tours: list[TourOption] = []
         seen_hotels: set[int] = set()
         dropped_disallowed = 0
+        dropped_budget = 0
+        budget_policy = BudgetPolicy.from_request(request)
 
         for hotel in data:
             if not isinstance(hotel, dict):
@@ -324,13 +380,14 @@ class TourvisorClient:
             if not isinstance(hotel_tours, list):
                 continue
 
-            # One best/cheapest allowed tour per hotel. Rating is hotel-level and
-            # is filtered again in ranking.py as a safety net.
+            # Filter every room by mandatory policy before choosing one option
+            # per hotel. Otherwise an inadmissible cheap room could hide an
+            # eligible room from min/range/approx searches.
             hotel_rating = _to_float(hotel.get("rating"))
             if hotel_rating is None or hotel_rating < settings.tourvisor_min_hotel_rating:
                 continue
 
-            hotel_tours = sorted(hotel_tours, key=lambda item: _to_int(item.get("price")) or 10**12)
+            allowed_hotel_tours: list[tuple[dict[str, Any], int]] = []
             for tour in hotel_tours:
                 if not isinstance(tour, dict):
                     continue
@@ -340,24 +397,38 @@ class TourvisorClient:
                     dropped_disallowed += 1
                     continue
 
-                hotel_id = _to_int(hotel.get("id"))
-                if hotel_id and hotel_id in seen_hotels:
-                    break
-                if hotel_id:
-                    seen_hotels.add(hotel_id)
-                option = self._parse_tour_option(hotel, tour, request)
-                normalize_tour_media(option)
-                tours.append(option)
-                break
+                price = _effective_tour_price(hotel, tour)
+                if not budget_policy.allows(price):
+                    dropped_budget += 1
+                    continue
+                allowed_hotel_tours.append((tour, price))
+
+            if not allowed_hotel_tours:
+                continue
+
+            hotel_id = _to_int(hotel.get("id"))
+            if hotel_id and hotel_id in seen_hotels:
+                continue
+            if hotel_id:
+                seen_hotels.add(hotel_id)
+
+            selected_tour, _ = max(
+                allowed_hotel_tours,
+                key=lambda item: budget_policy.hotel_choice_key(item[1]),
+            )
+            option = self._parse_tour_option(hotel, selected_tour, request)
+            normalize_tour_media(option)
+            tours.append(option)
 
         logger.info(
             "OPERATOR_FILTER request_id=%s policy_version=%s policy_hash=%s "
-            "allowed_count=%s dropped_disallowed=%s accepted=%s",
+            "allowed_count=%s dropped_disallowed=%s dropped_budget=%s accepted=%s",
             get_request_id(),
             self.operator_policy.version,
             self.operator_policy.short_hash,
             self.operator_policy.active_count,
             dropped_disallowed,
+            dropped_budget,
             len(tours),
         )
         return tours
@@ -380,7 +451,7 @@ class TourvisorClient:
             nights=_to_int(tour.get("nights")),
             adults=_to_int(tour.get("adults")),
             children=_to_int(tour.get("childs")),
-            price=_to_int(tour.get("price") or hotel.get("price")),
+            price=_effective_tour_price(hotel, tour),
             currency=str(tour.get("currency") or hotel.get("currency") or settings.tourvisor_currency),
             operator=_operator_text(operator),
             operator_id=_to_int(operator.get("id")) if isinstance(operator, dict) else None,
@@ -397,7 +468,19 @@ class TourvisorClient:
     def _mock_tours(self, request: TourSearchRequest) -> list[TourOption]:
         country = request.country
         departure = request.departure_city
-        budget = request.budget or 250000
+        budget_policy = BudgetPolicy.from_request(request)
+        if budget_policy.budget_type == "min":
+            floor = budget_policy.price_from or 250_000
+            prices = (floor, int(floor * 1.1), int(floor * 1.2))
+        elif budget_policy.budget_type in {"approx", "range"}:
+            floor = budget_policy.price_from or 0
+            ceiling = budget_policy.price_to or floor
+            prices = (floor, (floor + ceiling) // 2, ceiling)
+        elif budget_policy.budget_type == "unknown":
+            prices = (220_000, 250_000, 280_000)
+        else:
+            ceiling = budget_policy.price_to or 250_000
+            prices = (int(ceiling * 0.95), int(ceiling * 0.88), int(ceiling * 1.05))
         nights = request.nights_from or request.nights_to or 7
         adults = request.adults
         children = request.children
@@ -414,7 +497,7 @@ class TourvisorClient:
                 nights=nights,
                 adults=adults,
                 children=children,
-                price=int(budget * 0.95),
+                price=prices[0],
                 operator="Demo Operator",
                 room="Standard Room",
                 rating=4.6,
@@ -431,7 +514,7 @@ class TourvisorClient:
                 nights=nights + 1,
                 adults=adults,
                 children=children,
-                price=int(budget * 0.88),
+                price=prices[1],
                 operator="Demo Operator",
                 room="Promo Room",
                 rating=4.3,
@@ -448,7 +531,7 @@ class TourvisorClient:
                 nights=nights,
                 adults=adults,
                 children=children,
-                price=int(budget * 1.05),
+                price=prices[2],
                 operator="Demo Operator",
                 room="Family Room",
                 rating=4.8,
@@ -562,6 +645,14 @@ def _to_int(value: Any) -> int | None:
         return int(float(str(value).replace(" ", "")))
     except (TypeError, ValueError):
         return None
+
+
+def _effective_tour_price(hotel: dict[str, Any], tour: dict[str, Any]) -> int | None:
+    price = _to_int(tour.get("price"))
+    if price is not None and price > 0:
+        return price
+    hotel_price = _to_int(hotel.get("price"))
+    return hotel_price if hotel_price is not None and hotel_price > 0 else None
 
 
 def _to_float(value: Any) -> float | None:
