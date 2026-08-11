@@ -3,9 +3,11 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+
 
 from app.budget import BudgetPolicy
 from app.search_guard import (
@@ -117,7 +119,7 @@ class SearchGuardTest(unittest.TestCase):
         self.assertEqual(stale.dispatch_count, 1)
 
         self.guard.prune_expired()
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             stored_payload = connection.execute(
                 "SELECT replay_payload FROM search_attempts WHERE attempt_id = ?",
                 (first.attempt_id,),
@@ -298,7 +300,7 @@ class SearchGuardTest(unittest.TestCase):
         replay = self.guard.claim(raw_chat, request)
         self.assertEqual(replay.replay_payload, {"nested": {}, "status": "ok"})
 
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             rows = connection.execute(
                 "SELECT chat_key, search_fingerprint, delivery_fingerprint, replay_payload "
                 "FROM search_attempts"
