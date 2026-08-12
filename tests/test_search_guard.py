@@ -14,6 +14,7 @@ from app.search_guard import (
     AttemptState,
     ClaimAction,
     SearchGuard,
+    SearchDispatchLimitReached,
     SearchGuardConfigurationError,
     SearchGuardStateError,
     SearchGuardUnavailable,
@@ -101,6 +102,26 @@ class SearchGuardTest(unittest.TestCase):
         self.assertEqual(third.action, ClaimAction.LIMIT_REACHED)
         self.assertEqual(third.dispatch_count, 2)
         self.assertEqual(third.remaining_dispatches, 0)
+
+    def test_single_attempt_allows_two_dispatches_for_internal_fallback(self):
+        claim = self.guard.claim("chat-fallback", self.search())
+        self.assertEqual(claim.action, ClaimAction.CLAIMED)
+
+        first = self.guard.mark_dispatched(claim.attempt_id)
+        self.assertEqual(first.dispatch_number, 1)
+        self.assertEqual(first.remaining_dispatches, 1)
+
+        second = self.guard.mark_dispatched(claim.attempt_id)
+        self.assertEqual(second.dispatch_number, 2)
+        self.assertEqual(second.remaining_dispatches, 0)
+
+        with self.assertRaises(SearchDispatchLimitReached):
+            self.guard.mark_dispatched(claim.attempt_id)
+
+        self.guard.mark_succeeded(
+            claim.attempt_id,
+            {"status": "ok", "request_id": claim.attempt_id},
+        )
 
     def test_duplicate_replays_for_60_seconds_then_requires_explicit_refresh(self):
         first = self.guard.claim("chat-duplicate", self.search())

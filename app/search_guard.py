@@ -427,8 +427,15 @@ class SearchGuard:
                     """,
                     (attempt_id,),
                 ).fetchone()
-                if attempt is None or attempt["state"] != AttemptState.CLAIMED.value:
-                    raise SearchGuardStateError("only a claimed attempt may be dispatched")
+                allowed_states = {
+                    AttemptState.CLAIMED.value,
+                    AttemptState.DISPATCHED.value,
+                }
+                if attempt is None or attempt["state"] not in allowed_states:
+                    raise SearchGuardStateError(
+                        "only a claimed or already dispatched attempt may be dispatched"
+                    )
+                current_state = attempt["state"]
                 if float(attempt["created_at"]) <= now - self._stale_attempt_seconds:
                     connection.execute(
                         "DELETE FROM search_attempts WHERE attempt_id = ?",
@@ -462,14 +469,14 @@ class SearchGuard:
                 updated = connection.execute(
                     """
                     UPDATE search_attempts
-                    SET state = ?, dispatched_at = ?
+                    SET state = ?, dispatched_at = COALESCE(dispatched_at, ?)
                     WHERE attempt_id = ? AND state = ?
                     """,
                     (
                         AttemptState.DISPATCHED.value,
                         now,
                         attempt_id,
-                        AttemptState.CLAIMED.value,
+                        current_state,
                     ),
                 )
                 if updated.rowcount != 1:
