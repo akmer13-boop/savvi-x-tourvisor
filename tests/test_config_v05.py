@@ -99,6 +99,37 @@ class RuntimeConfigurationV05Test(unittest.TestCase):
         )
         verified.validate_runtime_configuration(active_operator_count=15)
 
+    def test_max_budget_corridors_are_validated(self):
+        invalid_primary = self._real_settings(
+            tourvisor_max_budget_primary_corridor=0,
+            tourvisor_max_budget_fallback_corridor=100_000,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR",
+        ):
+            invalid_primary.validate_runtime_configuration(
+                active_operator_count=15
+            )
+
+        invalid_fallback = self._real_settings(
+            tourvisor_max_budget_primary_corridor=100_000,
+            tourvisor_max_budget_fallback_corridor=25_000,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "TOURVISOR_MAX_BUDGET_FALLBACK_CORRIDOR",
+        ):
+            invalid_fallback.validate_runtime_configuration(
+                active_operator_count=15
+            )
+
+        valid = self._real_settings(
+            tourvisor_max_budget_primary_corridor=25_000,
+            tourvisor_max_budget_fallback_corridor=100_000,
+        )
+        valid.validate_runtime_configuration(active_operator_count=15)
+
     def test_guard_requires_explicit_persistence_restart_acknowledgement(self):
         configured = self._real_settings(
             search_guard_enabled=True,

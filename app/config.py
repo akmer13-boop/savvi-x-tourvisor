@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     tourvisor_poll_attempts: int = 10
     tourvisor_poll_interval_seconds: float = 2.0
     tourvisor_results_limit: int = 25
+    tourvisor_max_budget_primary_corridor: int = 25_000
+    tourvisor_max_budget_fallback_corridor: int = 100_000
 
     # Business filters and fail-closed operator policy.
     operator_registry_path: str = "config/operator_registry.json"
@@ -107,6 +109,18 @@ class Settings(BaseSettings):
         }:
             raise ValueError(
                 "TOURVISOR_API_CONTRACT_VERSION must be verified before enabling priceFrom"
+            )
+        if self.tourvisor_max_budget_primary_corridor <= 0:
+            raise ValueError(
+                "TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR must be greater than zero"
+            )
+        if (
+            self.tourvisor_max_budget_fallback_corridor
+            < self.tourvisor_max_budget_primary_corridor
+        ):
+            raise ValueError(
+                "TOURVISOR_MAX_BUDGET_FALLBACK_CORRIDOR must be greater than or equal "
+                "to TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR"
             )
         if self.production_mode:
             if self.mock_tourvisor:

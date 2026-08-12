@@ -117,10 +117,10 @@ class TourvisorClient:
             )
             tours = self._parse_search_results(results, request)
 
-            # A max-budget search may intentionally start in the final 100k
-            # corridor below the client's ceiling. If that focused search has
-            # no valid tours, spend the second guarded dispatch on the original
-            # client rule: any valid tour up to the same maximum budget.
+            # A max-budget search starts very close to the client's ceiling.
+            # If it is empty, spend the second guarded dispatch on a wider
+            # near-ceiling corridor instead of falling back to the whole 0-X
+            # range, which can bias Tourvisor results toward very cheap tours.
             if not tours and "priceFrom" in search_params:
                 budget_policy = BudgetPolicy.from_request(request)
                 if (
@@ -128,12 +128,21 @@ class TourvisorClient:
                     and budget_policy.price_to is not None
                 ):
                     fallback_params = dict(search_params)
-                    fallback_params.pop("priceFrom", None)
+                    fallback_from = max(
+                        0,
+                        budget_policy.price_to
+                        - settings.tourvisor_max_budget_fallback_corridor,
+                    )
+                    if fallback_from:
+                        fallback_params["priceFrom"] = fallback_from
+                    else:
+                        fallback_params.pop("priceFrom", None)
 
                     logger.info(
                         "TOURVISOR_MAX_BUDGET_FALLBACK request_id=%s "
-                        "price_to=%s",
+                        "price_from=%s price_to=%s",
                         get_request_id(),
+                        fallback_from or None,
                         budget_policy.price_to,
                     )
 
@@ -368,10 +377,13 @@ class TourvisorClient:
             and budget_policy.price_to is not None
             and price_from_verified
         ):
-            # For a client ceiling ("?? X"), search Tourvisor first in the
-            # final 100k corridor below that ceiling. Business validation
-            # still keeps the client's true rule as price <= X.
-            corridor_from = max(0, budget_policy.price_to - 100_000)
+            # Start close to the client's ceiling so Tourvisor's limited
+            # result set contains commercially relevant near-budget options.
+            corridor_from = max(
+                0,
+                budget_policy.price_to
+                - settings.tourvisor_max_budget_primary_corridor,
+            )
             upstream_price_from = corridor_from or None
 
         params: dict[str, Any] = {
