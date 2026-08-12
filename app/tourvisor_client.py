@@ -97,10 +97,17 @@ class TourvisorClient:
             )
             if before_dispatch is not None:
                 await before_dispatch()
-            search_response = await self._get(client, "/search/api/v1/tours/search", params=search_params)
+
+            search_response = await self._get(
+                client,
+                "/search/api/v1/tours/search",
+                params=search_params,
+            )
             search_id = str(search_response.get("searchId") or "")
             if not search_id:
-                raise RuntimeError(f"Tourvisor did not return searchId: {search_response}")
+                raise RuntimeError(
+                    f"Tourvisor did not return searchId: {search_response}"
+                )
 
             await self._wait_for_results(client, search_id)
             results = await self._get(
@@ -108,8 +115,61 @@ class TourvisorClient:
                 f"/search/api/v1/tours/search/{search_id}",
                 params={"limit": settings.tourvisor_results_limit},
             )
+            tours = self._parse_search_results(results, request)
 
-        tours = self._parse_search_results(results, request)
+            # A max-budget search may intentionally start in the final 100k
+            # corridor below the client's ceiling. If that focused search has
+            # no valid tours, spend the second guarded dispatch on the original
+            # client rule: any valid tour up to the same maximum budget.
+            if not tours and "priceFrom" in search_params:
+                budget_policy = BudgetPolicy.from_request(request)
+                if (
+                    budget_policy.budget_type == "max"
+                    and budget_policy.price_to is not None
+                ):
+                    fallback_params = dict(search_params)
+                    fallback_params.pop("priceFrom", None)
+
+                    logger.info(
+                        "TOURVISOR_MAX_BUDGET_FALLBACK request_id=%s "
+                        "price_to=%s",
+                        get_request_id(),
+                        budget_policy.price_to,
+                    )
+
+                    if before_dispatch is not None:
+                        await before_dispatch()
+
+                    fallback_response = await self._get(
+                        client,
+                        "/search/api/v1/tours/search",
+                        params=fallback_params,
+                    )
+                    fallback_search_id = str(
+                        fallback_response.get("searchId") or ""
+                    )
+                    if not fallback_search_id:
+                        raise RuntimeError(
+                            "Tourvisor did not return searchId for max-budget fallback"
+                        )
+
+                    await self._wait_for_results(
+                        client,
+                        fallback_search_id,
+                    )
+                    fallback_results = await self._get(
+                        client,
+                        f"/search/api/v1/tours/search/{fallback_search_id}",
+                        params={"limit": settings.tourvisor_results_limit},
+                    )
+
+                    fallback_tours = self._parse_search_results(
+                        fallback_results,
+                        request,
+                    )
+                    search_id = fallback_search_id
+                    tours = fallback_tours
+
         return search_id, tours
 
     async def enrich_tours_with_hotel_details(self, tours: list[TourOption]) -> list[TourOption]:

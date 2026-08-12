@@ -213,6 +213,191 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
             with self.assertRaises(TourvisorContractConfigurationError):
                 client._build_search_params(request, 1, 4, None, None)
 
+    def test_max_budget_falls_back_to_full_ceiling_when_corridor_is_empty(self):
+        client = TourvisorClient(policy=self.policy)
+        client.jwt = "unit-test-jwt"
+
+        request = self.request.model_copy(
+            update={
+                "budget": None,
+                "budget_type": "max",
+                "budget_to": 500_000,
+                "nights_from": 7,
+                "nights_to": 7,
+            }
+        )
+
+        before_dispatch = AsyncMock()
+
+        fallback_results = [
+            {
+                "id": 1,
+                "name": "Fallback Hotel",
+                "category": 4,
+                "rating": 4.5,
+                "tours": [
+                    {
+                        "id": 101,
+                        "price": 300_000,
+                        "operator": {"id": 13, "name": "Anex"},
+                    }
+                ],
+            }
+        ]
+
+        with (
+            patch.object(settings, "mock_tourvisor", False),
+            patch.object(settings, "tourvisor_price_from_enabled", True),
+            patch.object(
+                settings,
+                "tourvisor_api_contract_version",
+                "tourvisor-api-1.2.1-verified-2026-08-12",
+            ),
+            patch.object(
+                client,
+                "_resolve_departure",
+                new=AsyncMock(return_value={"id": 1}),
+            ),
+            patch.object(
+                client,
+                "_resolve_country",
+                new=AsyncMock(return_value={"id": 4}),
+            ),
+            patch.object(
+                client,
+                "_wait_for_results",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                client,
+                "_get",
+                new=AsyncMock(
+                    side_effect=[
+                        {"searchId": "corridor-search"},
+                        [],
+                        {"searchId": "fallback-search"},
+                        fallback_results,
+                    ]
+                ),
+            ) as mocked_get,
+        ):
+            search_id, tours = asyncio.run(
+                client.search_tours(
+                    request,
+                    before_dispatch=before_dispatch,
+                )
+            )
+
+        self.assertEqual(search_id, "fallback-search")
+        self.assertEqual([tour.price for tour in tours], [300_000])
+        self.assertEqual(before_dispatch.await_count, 2)
+
+        search_calls = [
+            call
+            for call in mocked_get.await_args_list
+            if len(call.args) >= 2
+            and call.args[1] == "/search/api/v1/tours/search"
+        ]
+        self.assertEqual(len(search_calls), 2)
+
+        first_params = search_calls[0].kwargs["params"]
+        second_params = search_calls[1].kwargs["params"]
+
+        self.assertEqual(first_params["priceFrom"], 400_000)
+        self.assertEqual(first_params["priceTo"], 500_000)
+
+        self.assertNotIn("priceFrom", second_params)
+        self.assertEqual(second_params["priceTo"], 500_000)
+
+    def test_max_budget_does_not_fallback_when_corridor_has_results(self):
+        client = TourvisorClient(policy=self.policy)
+        client.jwt = "unit-test-jwt"
+
+        request = self.request.model_copy(
+            update={
+                "budget": None,
+                "budget_type": "max",
+                "budget_to": 500_000,
+                "nights_from": 7,
+                "nights_to": 7,
+            }
+        )
+
+        before_dispatch = AsyncMock()
+
+        corridor_results = [
+            {
+                "id": 1,
+                "name": "Corridor Hotel",
+                "category": 5,
+                "rating": 4.8,
+                "tours": [
+                    {
+                        "id": 101,
+                        "price": 490_000,
+                        "operator": {"id": 13, "name": "Anex"},
+                    }
+                ],
+            }
+        ]
+
+        with (
+            patch.object(settings, "mock_tourvisor", False),
+            patch.object(settings, "tourvisor_price_from_enabled", True),
+            patch.object(
+                settings,
+                "tourvisor_api_contract_version",
+                "tourvisor-api-1.2.1-verified-2026-08-12",
+            ),
+            patch.object(
+                client,
+                "_resolve_departure",
+                new=AsyncMock(return_value={"id": 1}),
+            ),
+            patch.object(
+                client,
+                "_resolve_country",
+                new=AsyncMock(return_value={"id": 4}),
+            ),
+            patch.object(
+                client,
+                "_wait_for_results",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                client,
+                "_get",
+                new=AsyncMock(
+                    side_effect=[
+                        {"searchId": "corridor-search"},
+                        corridor_results,
+                    ]
+                ),
+            ) as mocked_get,
+        ):
+            search_id, tours = asyncio.run(
+                client.search_tours(
+                    request,
+                    before_dispatch=before_dispatch,
+                )
+            )
+
+        self.assertEqual(search_id, "corridor-search")
+        self.assertEqual([tour.price for tour in tours], [490_000])
+        self.assertEqual(before_dispatch.await_count, 1)
+
+        search_calls = [
+            call
+            for call in mocked_get.await_args_list
+            if len(call.args) >= 2
+            and call.args[1] == "/search/api/v1/tours/search"
+        ]
+        self.assertEqual(len(search_calls), 1)
+
+        params = search_calls[0].kwargs["params"]
+        self.assertEqual(params["priceFrom"], 400_000)
+        self.assertEqual(params["priceTo"], 500_000)
+
     def test_before_dispatch_runs_once_for_mock_search(self):
         client = TourvisorClient(policy=self.policy)
         before_dispatch = AsyncMock()
