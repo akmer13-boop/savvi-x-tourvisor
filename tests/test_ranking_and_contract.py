@@ -136,7 +136,7 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
         self.assertIn("priceTo=250000", url)
         self.assertNotIn("priceFrom=", url)
 
-    def test_max_budget_uses_final_100k_upstream_corridor(self):
+    def test_max_budget_uses_near_ceiling_primary_corridor(self):
         client = TourvisorClient(policy=self.policy)
         request = self.request.model_copy(
             update={
@@ -162,7 +162,7 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
                 meal_id=None,
             )
 
-        self.assertEqual(params["priceFrom"], 400_000)
+        self.assertEqual(params["priceFrom"], 475_000)
         self.assertEqual(params["priceTo"], 500_000)
 
     def test_price_from_contract_and_unknown_query_shape(self):
@@ -213,7 +213,7 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
             with self.assertRaises(TourvisorContractConfigurationError):
                 client._build_search_params(request, 1, 4, None, None)
 
-    def test_max_budget_falls_back_to_full_ceiling_when_corridor_is_empty(self):
+    def test_max_budget_falls_back_to_wider_near_ceiling_corridor(self):
         client = TourvisorClient(policy=self.policy)
         client.jwt = "test-only-jwt"
 
@@ -303,10 +303,10 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
         first_params = search_calls[0].kwargs["params"]
         second_params = search_calls[1].kwargs["params"]
 
-        self.assertEqual(first_params["priceFrom"], 400_000)
+        self.assertEqual(first_params["priceFrom"], 475_000)
         self.assertEqual(first_params["priceTo"], 500_000)
 
-        self.assertNotIn("priceFrom", second_params)
+        self.assertEqual(second_params["priceFrom"], 400_000)
         self.assertEqual(second_params["priceTo"], 500_000)
 
     def test_max_budget_does_not_fallback_when_corridor_has_results(self):
@@ -395,7 +395,7 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
         self.assertEqual(len(search_calls), 1)
 
         params = search_calls[0].kwargs["params"]
-        self.assertEqual(params["priceFrom"], 400_000)
+        self.assertEqual(params["priceFrom"], 475_000)
         self.assertEqual(params["priceTo"], 500_000)
 
     def test_polling_waits_until_search_is_complete(self):
