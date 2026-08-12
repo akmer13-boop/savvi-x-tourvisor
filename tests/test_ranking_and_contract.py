@@ -56,6 +56,34 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
         selected = select_best_tours(tours, self.request, policy=self.policy)
         self.assertEqual([tour.hotel for tour in selected], ["CORRIDOR", "CHEAP"])
 
+    def test_max_budget_sorts_by_price_closest_to_ceiling(self):
+        request = self.request.model_copy(
+            update={
+                "budget": None,
+                "budget_type": "max",
+                "budget_to": 500_000,
+            }
+        )
+        tours = [
+            TourOption(country="Турция", hotel="410K", price=410_000, rating=5.0, operator_id=13),
+            TourOption(country="Турция", hotel="495K", price=495_000, rating=4.5, operator_id=13),
+            TourOption(country="Турция", hotel="440K", price=440_000, rating=4.5, operator_id=13),
+            TourOption(country="Турция", hotel="470K", price=470_000, rating=4.5, operator_id=13),
+            TourOption(country="Турция", hotel="OVER", price=510_000, rating=5.0, operator_id=13),
+        ]
+
+        selected = select_best_tours(tours, request, policy=self.policy)
+
+        self.assertEqual(
+            [(tour.hotel, tour.price) for tour in selected],
+            [
+                ("495K", 495_000),
+                ("470K", 470_000),
+                ("440K", 440_000),
+                ("410K", 410_000),
+            ],
+        )
+
     def test_min_range_approx_and_unknown_post_filters(self):
         tours = [
             TourOption(country="Турция", hotel="LOW", price=200_000, rating=4.5, operator_id=13),
