@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     tourvisor_jwt: str = ""
     tourvisor_currency: str = "RUB"
     tourvisor_timeout_seconds: int = 20
-    tourvisor_poll_attempts: int = 4
+    tourvisor_poll_attempts: int = 10
     tourvisor_poll_interval_seconds: float = 2.0
     tourvisor_results_limit: int = 25
 

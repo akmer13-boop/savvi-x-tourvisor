@@ -65,12 +65,24 @@ def select_best_tours(
     if request.hotel_stars:
         tours = [tour for tour in tours if tour.stars is not None and tour.stars >= request.hotel_stars]
 
-    sorted_tours = sorted(
-        tours,
-        key=lambda item: (
-            budget_policy.priority_bucket(item.price),
-            score_tour(item, request, budget_policy=budget_policy),
-        ),
-        reverse=True,
-    )
+    if budget_policy.budget_type == "max":
+        sorted_tours = sorted(
+            tours,
+            key=lambda item: (
+                budget_policy.priority_bucket(item.price),
+                item.price or 0,
+                score_tour(item, request, budget_policy=budget_policy),
+            ),
+            reverse=True,
+        )
+    else:
+        sorted_tours = sorted(
+            tours,
+            key=lambda item: (
+                budget_policy.priority_bucket(item.price),
+                score_tour(item, request, budget_policy=budget_policy),
+            ),
+            reverse=True,
+        )
+
     return sorted_tours[:limit]

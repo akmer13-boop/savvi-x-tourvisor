@@ -3,15 +3,18 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
+
 
 from app.budget import BudgetPolicy
 from app.search_guard import (
     AttemptState,
     ClaimAction,
     SearchGuard,
+    SearchDispatchLimitReached,
     SearchGuardConfigurationError,
     SearchGuardStateError,
     SearchGuardUnavailable,
@@ -100,6 +103,26 @@ class SearchGuardTest(unittest.TestCase):
         self.assertEqual(third.dispatch_count, 2)
         self.assertEqual(third.remaining_dispatches, 0)
 
+    def test_single_attempt_allows_two_dispatches_for_internal_fallback(self):
+        claim = self.guard.claim("chat-fallback", self.search())
+        self.assertEqual(claim.action, ClaimAction.CLAIMED)
+
+        first = self.guard.mark_dispatched(claim.attempt_id)
+        self.assertEqual(first.dispatch_number, 1)
+        self.assertEqual(first.remaining_dispatches, 1)
+
+        second = self.guard.mark_dispatched(claim.attempt_id)
+        self.assertEqual(second.dispatch_number, 2)
+        self.assertEqual(second.remaining_dispatches, 0)
+
+        with self.assertRaises(SearchDispatchLimitReached):
+            self.guard.mark_dispatched(claim.attempt_id)
+
+        self.guard.mark_succeeded(
+            claim.attempt_id,
+            {"status": "ok", "request_id": claim.attempt_id},
+        )
+
     def test_duplicate_replays_for_60_seconds_then_requires_explicit_refresh(self):
         first = self.guard.claim("chat-duplicate", self.search())
         self.complete_success(first, {"status": "ok", "price": 499_000})
@@ -117,7 +140,7 @@ class SearchGuardTest(unittest.TestCase):
         self.assertEqual(stale.dispatch_count, 1)
 
         self.guard.prune_expired()
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             stored_payload = connection.execute(
                 "SELECT replay_payload FROM search_attempts WHERE attempt_id = ?",
                 (first.attempt_id,),
@@ -298,7 +321,7 @@ class SearchGuardTest(unittest.TestCase):
         replay = self.guard.claim(raw_chat, request)
         self.assertEqual(replay.replay_payload, {"nested": {}, "status": "ok"})
 
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             rows = connection.execute(
                 "SELECT chat_key, search_fingerprint, delivery_fingerprint, replay_payload "
                 "FROM search_attempts"
