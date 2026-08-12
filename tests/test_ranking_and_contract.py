@@ -136,6 +136,35 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
         self.assertIn("priceTo=250000", url)
         self.assertNotIn("priceFrom=", url)
 
+    def test_max_budget_uses_final_100k_upstream_corridor(self):
+        client = TourvisorClient(policy=self.policy)
+        request = self.request.model_copy(
+            update={
+                "budget": None,
+                "budget_type": "max",
+                "budget_to": 500_000,
+            }
+        )
+
+        with (
+            patch.object(settings, "tourvisor_price_from_enabled", True),
+            patch.object(
+                settings,
+                "tourvisor_api_contract_version",
+                "tourvisor-api-1.2.1-verified-2026-08-12",
+            ),
+        ):
+            params = client._build_search_params(
+                request,
+                departure_id=1,
+                country_id=4,
+                region_id=None,
+                meal_id=None,
+            )
+
+        self.assertEqual(params["priceFrom"], 400_000)
+        self.assertEqual(params["priceTo"], 500_000)
+
     def test_price_from_contract_and_unknown_query_shape(self):
         client = TourvisorClient(policy=self.policy)
         min_request = self.request.model_copy(

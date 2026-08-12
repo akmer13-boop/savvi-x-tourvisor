@@ -295,6 +295,25 @@ class TourvisorClient:
         budget_policy = BudgetPolicy.from_request(request)
         self._validate_budget_contract(request)
 
+        upstream_price_from = budget_policy.price_from
+
+        contract_version = settings.tourvisor_api_contract_version.strip().lower()
+        price_from_verified = (
+            settings.tourvisor_price_from_enabled
+            and contract_version not in {"", "unknown", "unverified"}
+        )
+
+        if (
+            budget_policy.budget_type == "max"
+            and budget_policy.price_to is not None
+            and price_from_verified
+        ):
+            # For a client ceiling ("?? X"), search Tourvisor first in the
+            # final 100k corridor below that ceiling. Business validation
+            # still keeps the client's true rule as price <= X.
+            corridor_from = max(0, budget_policy.price_to - 100_000)
+            upstream_price_from = corridor_from or None
+
         params: dict[str, Any] = {
             "departureId": departure_id,
             "countryId": country_id,
@@ -306,7 +325,7 @@ class TourvisorClient:
             "currency": settings.tourvisor_currency,
             "onlyCharter": False,
             "onlyDirect": False,
-            "priceFrom": budget_policy.price_from,
+            "priceFrom": upstream_price_from,
             "priceTo": budget_policy.price_to,
             "hotelCategory": request.hotel_stars,
             "hotelRating": 4,
