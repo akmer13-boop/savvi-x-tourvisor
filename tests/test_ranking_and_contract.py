@@ -398,6 +398,53 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
         self.assertEqual(params["priceFrom"], 400_000)
         self.assertEqual(params["priceTo"], 500_000)
 
+    def test_polling_waits_until_search_is_complete(self):
+        client = TourvisorClient(policy=self.policy)
+        mocked_get = AsyncMock(
+            side_effect=[
+                {"status": "searching", "progress": 15},
+                {"status": "searching", "progress": 43},
+                {"status": "completed", "progress": 100},
+            ]
+        )
+
+        with (
+            patch.object(settings, "tourvisor_poll_attempts", 10),
+            patch.object(settings, "tourvisor_poll_interval_seconds", 0),
+            patch.object(client, "_get", new=mocked_get),
+        ):
+            asyncio.run(
+                client._wait_for_results(
+                    None,
+                    "polling-search",
+                )
+            )
+
+        self.assertEqual(mocked_get.await_count, 3)
+
+    def test_polling_uses_all_attempts_when_search_remains_incomplete(self):
+        client = TourvisorClient(policy=self.policy)
+        mocked_get = AsyncMock(
+            return_value={
+                "status": "searching",
+                "progress": 43,
+            }
+        )
+
+        with (
+            patch.object(settings, "tourvisor_poll_attempts", 10),
+            patch.object(settings, "tourvisor_poll_interval_seconds", 0),
+            patch.object(client, "_get", new=mocked_get),
+        ):
+            asyncio.run(
+                client._wait_for_results(
+                    None,
+                    "slow-search",
+                )
+            )
+
+        self.assertEqual(mocked_get.await_count, 10)
+
     def test_before_dispatch_runs_once_for_mock_search(self):
         client = TourvisorClient(policy=self.policy)
         before_dispatch = AsyncMock()
