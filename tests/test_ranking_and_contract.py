@@ -215,7 +215,7 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
 
     def test_max_budget_falls_back_to_full_ceiling_when_corridor_is_empty(self):
         client = TourvisorClient(policy=self.policy)
-        client.jwt = "unit-test-jwt"
+        client.jwt = "test-only-jwt"
 
         request = self.request.model_copy(
             update={
@@ -311,7 +311,7 @@ class RankingAndTourvisorContractTest(unittest.TestCase):
 
     def test_max_budget_does_not_fallback_when_corridor_has_results(self):
         client = TourvisorClient(policy=self.policy)
-        client.jwt = "unit-test-jwt"
+        client.jwt = "test-only-jwt"
 
         request = self.request.model_copy(
             update={
