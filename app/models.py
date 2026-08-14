@@ -172,6 +172,22 @@ class TourOption(BaseModel):
     room_area: int | None = None
     room_sleeping_places: str | None = None
     room_view_description: str | None = None
+
+    # Flight actualization. These fields are populated only after the official
+    # /tours/{tourId}/flights call succeeds for the displayed Tourvisor option.
+    search_price: int | None = None
+    flight_actualized: bool = False
+    flight_included: bool | None = None
+    flight_is_direct: bool | None = None
+    flight_origin: str | None = None
+    flight_destination: str | None = None
+    flight_forward_date: str | None = None
+    flight_forward_departure_time: str | None = None
+    flight_forward_arrival_time: str | None = None
+    flight_backward_date: str | None = None
+    flight_backward_departure_time: str | None = None
+    flight_backward_arrival_time: str | None = None
+
     raw: dict[str, Any] = Field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
@@ -193,6 +209,17 @@ class TourOption(BaseModel):
             "room_images": self.room_images,
             "tour_picture": self.tour_picture,
             "link": self.link,
+            "flight_actualized": self.flight_actualized,
+            "flight_included": self.flight_included,
+            "flight_is_direct": self.flight_is_direct,
+            "flight_origin": self.flight_origin,
+            "flight_destination": self.flight_destination,
+            "flight_forward_date": self.flight_forward_date,
+            "flight_forward_departure_time": self.flight_forward_departure_time,
+            "flight_forward_arrival_time": self.flight_forward_arrival_time,
+            "flight_backward_date": self.flight_backward_date,
+            "flight_backward_departure_time": self.flight_backward_departure_time,
+            "flight_backward_arrival_time": self.flight_backward_arrival_time,
         }
 
 
