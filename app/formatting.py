@@ -21,20 +21,34 @@ _RU_MONTHS = {
 }
 
 
-def _format_date_ru(value: str | None) -> str | None:
+def _parse_date(value: str | None) -> date | None:
     if not value:
         return None
     raw = str(value).strip()
-    parsed: date | None = None
     for fmt in ("%Y-%m-%d", "%Y.%m.%d", "%d.%m.%Y", "%d-%m-%Y"):
         try:
-            parsed = datetime.strptime(raw[:10], fmt).date()
-            break
+            return datetime.strptime(raw[:10], fmt).date()
         except ValueError:
             continue
+    return None
+
+
+def _format_date_ru(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = _parse_date(value)
     if not parsed:
-        return raw
+        return str(value).strip()
     return f"{parsed.day} {_RU_MONTHS[parsed.month]} {parsed.year} года"
+
+
+def _format_date_short_ru(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = _parse_date(value)
+    if not parsed:
+        return str(value).strip()
+    return f"{parsed.day} {_RU_MONTHS[parsed.month]}"
 
 
 def _adult_word(value: int) -> str:
@@ -88,6 +102,60 @@ def _location(tour: TourOption) -> str | None:
     return ", ".join(values) or None
 
 
+def _flight_lines(tour: TourOption) -> list[str]:
+    """Return the compact client-facing flight block requested by the business."""
+    if not tour.flight_actualized or tour.flight_included is False:
+        return []
+    if not tour.flight_origin or not tour.flight_destination:
+        return []
+
+    route = f"✈️ {tour.flight_origin} → {tour.flight_destination} → {tour.flight_origin}"
+    if tour.flight_is_direct is False:
+        route += " • с пересадкой"
+    lines = [route]
+
+    forward_date = _format_date_short_ru(tour.flight_forward_date)
+    if (
+        forward_date
+        and tour.flight_forward_departure_time
+        and tour.flight_forward_arrival_time
+    ):
+        lines.append(
+            f"{forward_date}: {tour.flight_forward_departure_time} → "
+            f"{tour.flight_forward_arrival_time}"
+        )
+
+    backward_date = _format_date_short_ru(tour.flight_backward_date)
+    if (
+        backward_date
+        and tour.flight_backward_departure_time
+        and tour.flight_backward_arrival_time
+    ):
+        lines.append(
+            f"{backward_date}: {tour.flight_backward_departure_time} → "
+            f"{tour.flight_backward_arrival_time}"
+        )
+    return lines
+
+
+def _availability_footer(tours: list[TourOption]) -> str:
+    actualized = sum(1 for tour in tours if tour.flight_actualized)
+    if tours and actualized == len(tours):
+        return (
+            "Рейсы и стоимость актуализированы на момент поиска. "
+            "Перед бронированием менеджер подтвердит наличие и финальные условия."
+        )
+    if actualized:
+        return (
+            "Для части вариантов рейсы и стоимость актуализированы на момент поиска. "
+            "Перед бронированием менеджер подтвердит перелёт, наличие и финальную стоимость."
+        )
+    return (
+        "Цены актуальны на момент поиска. "
+        "Перед бронированием менеджер проверит наличие, перелёт и финальную стоимость."
+    )
+
+
 def format_tour_card_text(tour: TourOption, request: TourSearchRequest, index: int) -> str:
     title = tour.hotel + (f" {tour.stars}★" if tour.stars else "")
     lines: list[str] = [f"🏨 {index}. {title}"]
@@ -96,9 +164,14 @@ def format_tour_card_text(tour: TourOption, request: TourSearchRequest, index: i
     if location:
         lines.append(f"📍 {location}")
 
-    fly_date = _format_date_ru(tour.fly_date)
-    if fly_date:
-        lines.append(f"✈️ Вылет: {fly_date}")
+    flight_lines = _flight_lines(tour)
+    if flight_lines:
+        lines.extend(flight_lines)
+    else:
+        fly_date = _format_date_ru(tour.fly_date)
+        if fly_date:
+            lines.append(f"✈️ Вылет: {fly_date}")
+
     if tour.nights:
         lines.append(f"🌙 Продолжительность: {tour.nights} {_night_word(tour.nights)}")
 
@@ -120,7 +193,10 @@ def format_tour_card_text(tour: TourOption, request: TourSearchRequest, index: i
 
     price = _money(tour.price, tour.currency)
     if price:
-        lines.append(f"💰 Стоимость: от {price}")
+        if tour.flight_actualized:
+            lines.append(f"💰 Стоимость: {price}")
+        else:
+            lines.append(f"💰 Стоимость: от {price}")
     if tour.link:
         lines.append(f"🔗 Подробнее: {tour.link}")
 
@@ -173,7 +249,7 @@ def format_tours_for_client(
                 lines.extend(room_images)
 
     lines.append("")
-    lines.append("Цены актуальны на момент поиска. Перед бронированием менеджер проверит наличие, перелёт и финальную стоимость.")
+    lines.append(_availability_footer(tours))
     # No closing question here: Suvvy controls dialogue continuation and must not duplicate it.
     return "\n".join(lines)
 
@@ -201,7 +277,7 @@ def format_tours_with_images_for_client(
             lines.extend(room_images)
 
     lines.append("")
-    lines.append("Цены актуальны на момент поиска. Перед бронированием менеджер проверит наличие, перелёт и финальную стоимость.")
+    lines.append(_availability_footer(tours))
     return "\n".join(lines)
 
 
@@ -227,14 +303,20 @@ def format_tours_compact_for_suvvy(
         if location:
             lines.append(f"📍 {location}")
 
-        trip_parts: list[str] = []
-        fly_date = _format_date_ru(tour.fly_date)
-        if fly_date:
-            trip_parts.append(fly_date)
-        if tour.nights:
-            trip_parts.append(f"{tour.nights} {_night_word(tour.nights)}")
-        if trip_parts:
-            lines.append("✈️ " + " • ".join(trip_parts))
+        flight_lines = _flight_lines(tour)
+        if flight_lines:
+            lines.extend(flight_lines)
+            if tour.nights:
+                lines.append(f"🌙 {tour.nights} {_night_word(tour.nights)}")
+        else:
+            trip_parts: list[str] = []
+            fly_date = _format_date_ru(tour.fly_date)
+            if fly_date:
+                trip_parts.append(fly_date)
+            if tour.nights:
+                trip_parts.append(f"{tour.nights} {_night_word(tour.nights)}")
+            if trip_parts:
+                lines.append("✈️ " + " • ".join(trip_parts))
 
         lines.append(f"👥 {_travelers_text(request)}")
         if tour.meal:
@@ -252,7 +334,10 @@ def format_tours_compact_for_suvvy(
 
         price = _money(tour.price, tour.currency)
         if price:
-            lines.append(f"💰 от {price}")
+            if tour.flight_actualized:
+                lines.append(f"💰 {price}")
+            else:
+                lines.append(f"💰 от {price}")
 
         main_images, room_images = _group_images(
             tour,
@@ -264,8 +349,5 @@ def format_tours_compact_for_suvvy(
             label = "Номер" if len(room_images) == 1 else f"Номер {image_index}"
             lines.append(f"🖼️ {label}: {image_url}")
 
-    lines.extend([
-        "",
-        "Цены актуальны на момент поиска. Наличие, перелёт и итоговую стоимость проверит менеджер.",
-    ])
+    lines.extend(["", _availability_footer(tours)])
     return "\n".join(lines)
