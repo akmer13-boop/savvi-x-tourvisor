@@ -181,15 +181,77 @@ class TourvisorClient:
 
         return search_id, tours
 
-    async def enrich_tours_with_hotel_details(self, tours: list[TourOption]) -> list[TourOption]:
-        """Attach the official Tourvisor hotel cover image.
+    async def enrich_tours_with_flight_details(self, tours: list[TourOption]) -> list[TourOption]:
+        """Actualize flights and final price for the client-facing Tourvisor cards.
 
-        Tourvisor docs: GET /search/api/v1/hotels/{hotelId} returns the hotel
-        description and an ordered ``images`` array. This method belongs to the
-        separately paid Hotel Descriptions API. The first image is treated as
-        the selling/cover photo. If access is unavailable, the search remains
-        successful and the response falls back to room photos.
+        Tourvisor documents GET /search/api/v1/tours/{tourId}/flights as the
+        source of flight variants and the current/final tour price. Every call
+        consumes the Tourvisor daily search quota, therefore only the first
+        explicitly configured client-facing tours are actualized.
         """
+        if settings.mock_tourvisor or not settings.tourvisor_enable_flight_actualization:
+            return tours
+
+        candidates = [tour for tour in tours if tour.tour_id][
+            : max(settings.tourvisor_flight_actualization_limit, 0)
+        ]
+        if not candidates:
+            return tours
+
+        semaphore = asyncio.Semaphore(
+            max(settings.tourvisor_flight_actualization_concurrency, 1)
+        )
+
+        async def fetch_one(
+            client: httpx.AsyncClient,
+            tour: TourOption,
+        ) -> tuple[TourOption, Any | None]:
+            async with semaphore:
+                try:
+                    payload = await self._get(
+                        client,
+                        f"/search/api/v1/tours/{tour.tour_id}/flights",
+                        params={"currency": tour.currency or settings.tourvisor_currency},
+                    )
+                    return tour, payload
+                except Exception as exc:  # noqa: BLE001 - enrichment must not break search
+                    logger.warning(
+                        "TOURVISOR_FLIGHT_ACTUALIZATION_FAILED request_id=%s "
+                        "tour_id=%s error_type=%s",
+                        get_request_id(),
+                        tour.tour_id,
+                        type(exc).__name__,
+                    )
+                    return tour, None
+
+        async with httpx.AsyncClient(timeout=settings.tourvisor_timeout_seconds) as client:
+            payloads = await asyncio.gather(*(fetch_one(client, tour) for tour in candidates))
+
+        for tour, payload in payloads:
+            if not _apply_flight_actualization(tour, payload):
+                continue
+            logger.info(
+                "TOURVISOR_FLIGHT_ACTUALIZED request_id=%s tour_id=%s "
+                "route=%s->%s price=%s direct=%s",
+                get_request_id(),
+                tour.tour_id,
+                tour.flight_origin,
+                tour.flight_destination,
+                tour.price,
+                tour.flight_is_direct,
+            )
+        return tours
+
+    async def enrich_tours_with_hotel_details(self, tours: list[TourOption]) -> list[TourOption]:
+        """Actualize flights, then attach the official Tourvisor hotel cover image.
+
+        Flight actualization is intentionally performed at the start of the
+        existing selected-tour enrichment pipeline so only final client-facing
+        tours consume the billable /flights method. Hotel images remain an
+        independent paid API and may be disabled without disabling flights.
+        """
+        tours = await self.enrich_tours_with_flight_details(tours)
+
         if settings.mock_tourvisor or not settings.tourvisor_enable_hotel_images:
             return tours
 
@@ -629,6 +691,127 @@ class TourvisorClient:
                 link=settings.tourvisor_public_search_url or None,
             ),
         ]
+
+
+def _apply_flight_actualization(tour: TourOption, payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    error = payload.get("error")
+    if isinstance(error, dict):
+        error_code = _to_int(error.get("code"))
+        if error_code not in {None, 0}:
+            logger.warning(
+                "Tourvisor flight actualization returned error code=%s reason=%s",
+                error_code,
+                str(error.get("reason") or "")[:120],
+            )
+            return False
+
+    info = payload.get("info") or {}
+    flags = info.get("flags") if isinstance(info, dict) else {}
+    if isinstance(flags, dict) and flags.get("noFlight") is True:
+        tour.flight_included = False
+        return False
+
+    flights = payload.get("flights") or []
+    if not isinstance(flights, list):
+        return False
+
+    valid_options = [item for item in flights if isinstance(item, dict)]
+    available_options = [item for item in valid_options if _flight_option_has_places(item)]
+    if not available_options:
+        return False
+
+    selected = next(
+        (item for item in available_options if item.get("isDefault") is True),
+        available_options[0],
+    )
+
+    forward = _flight_segments(selected.get("forward"))
+    backward = _flight_segments(selected.get("backward"))
+    if not forward or not backward:
+        return False
+
+    forward_first = forward[0]
+    forward_last = forward[-1]
+    backward_first = backward[0]
+    backward_last = backward[-1]
+
+    forward_departure = _flight_endpoint(forward_first, "departure")
+    forward_arrival = _flight_endpoint(forward_last, "arrival")
+    backward_departure = _flight_endpoint(backward_first, "departure")
+    backward_arrival = _flight_endpoint(backward_last, "arrival")
+
+    destination = _flight_port_name(forward_arrival.get("port"))
+    origin = tour.departure_city or _flight_port_name(forward_departure.get("port"))
+    if not origin or not destination:
+        return False
+
+    price = selected.get("price") or {}
+    actualized_price = _to_int(price.get("value")) if isinstance(price, dict) else None
+    if actualized_price is not None and actualized_price > 0:
+        if tour.search_price is None:
+            tour.search_price = tour.price
+        tour.price = actualized_price
+        if isinstance(price, dict) and price.get("currency"):
+            tour.currency = str(price.get("currency"))
+
+    tour.flight_actualized = True
+    tour.flight_included = True
+    tour.flight_is_direct = len(forward) == 1 and len(backward) == 1
+    tour.flight_origin = origin
+    tour.flight_destination = destination
+    tour.flight_forward_date = (
+        str(forward_departure.get("date"))
+        if forward_departure.get("date")
+        else str(selected.get("dateForward") or "") or None
+    )
+    tour.flight_forward_departure_time = _flight_time(forward_departure.get("time"))
+    tour.flight_forward_arrival_time = _flight_time(forward_arrival.get("time"))
+    tour.flight_backward_date = (
+        str(backward_departure.get("date"))
+        if backward_departure.get("date")
+        else str(selected.get("dateBackward") or "") or None
+    )
+    tour.flight_backward_departure_time = _flight_time(backward_departure.get("time"))
+    tour.flight_backward_arrival_time = _flight_time(backward_arrival.get("time"))
+    return True
+
+
+def _flight_segments(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _flight_option_has_places(option: dict[str, Any]) -> bool:
+    segments = _flight_segments(option.get("forward")) + _flight_segments(option.get("backward"))
+    if not segments:
+        return False
+    return not any(segment.get("noPlaces") is True for segment in segments)
+
+
+def _flight_endpoint(segment: dict[str, Any], key: str) -> dict[str, Any]:
+    value = segment.get(key) or {}
+    return value if isinstance(value, dict) else {}
+
+
+def _flight_port_name(value: Any) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    name = value.get("name") or value.get("shortName")
+    return str(name).strip() if name else None
+
+
+def _flight_time(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # Tourvisor examples use HH:MM, but defensive slicing also handles HH:MM:SS.
+    return text[:5] if re.fullmatch(r"\d{2}:\d{2}(?::\d{2})?", text) else text
 
 
 def _extract_hotel_images(payload: Any) -> list[str]:
