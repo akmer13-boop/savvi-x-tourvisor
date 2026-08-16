@@ -137,7 +137,7 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "TOURVISOR_MAX_BUDGET_FALLBACK_CORRIDOR must be greater than or equal "
-                "TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR"
+                "to TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR"
             )
         if self.tourvisor_flight_actualization_limit <= 0:
             raise ValueError("TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT must be greater than zero")
