@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_environment: str = "development"
-    service_version: str = "0.5.3"
+    service_version: str = "0.5.4"
     api_contract_version: str = "2026-07-21.2"
     git_commit_sha: str = "unknown"
 
@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     tourvisor_flight_actualization_limit: int = 3
     tourvisor_flight_actualization_concurrency: int = 1
     tourvisor_flight_timeout_seconds: int = 45
+
+    # Controlled deep diagnostics for the slow /flights endpoint. When enabled,
+    # the bridge first validates the selected tour through the non-billable
+    # /tours/{tourId} endpoint, then performs the single configured /flights
+    # request with explicit connect/read timeouts and safe response metadata logs.
+    tourvisor_flight_diagnostic_mode: bool = False
+    tourvisor_flight_diagnostic_connect_timeout_seconds: int = 10
+    tourvisor_flight_diagnostic_read_timeout_seconds: int = 90
 
     # Business filters and fail-closed operator policy.
     operator_registry_path: str = "config/operator_registry.json"
@@ -113,6 +121,13 @@ class Settings(BaseSettings):
             max(self.tourvisor_flight_actualization_limit, 1),
         )
 
+    @property
+    def effective_flight_read_timeout_seconds(self) -> int:
+        """Read timeout actually used for /flights in the current rollout mode."""
+        if self.tourvisor_flight_diagnostic_mode:
+            return max(self.tourvisor_flight_diagnostic_read_timeout_seconds, 1)
+        return max(self.tourvisor_flight_timeout_seconds, 1)
+
     def validate_runtime_configuration(self, active_operator_count: int) -> None:
         """Fail before serving traffic when a real integration is unsafe."""
         try:
@@ -149,6 +164,14 @@ class Settings(BaseSettings):
         # is safely bounded by effective_flight_actualization_concurrency.
         if self.tourvisor_flight_timeout_seconds <= 0:
             raise ValueError("TOURVISOR_FLIGHT_TIMEOUT_SECONDS must be greater than zero")
+        if self.tourvisor_flight_diagnostic_connect_timeout_seconds <= 0:
+            raise ValueError(
+                "TOURVISOR_FLIGHT_DIAGNOSTIC_CONNECT_TIMEOUT_SECONDS must be greater than zero"
+            )
+        if self.tourvisor_flight_diagnostic_read_timeout_seconds <= 0:
+            raise ValueError(
+                "TOURVISOR_FLIGHT_DIAGNOSTIC_READ_TIMEOUT_SECONDS must be greater than zero"
+            )
         if self.production_mode:
             if self.mock_tourvisor:
                 raise ValueError("MOCK_TOURVISOR must be false in production")
