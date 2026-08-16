@@ -130,7 +130,7 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
         self.assertIn("/tours/12345/flights", client._get.await_args.args[1])
         self.assertEqual(client._get.await_args.kwargs["params"], {"currency": "RUB"})
 
-    def test_compact_output_uses_requested_route_shape(self):
+    def test_compact_output_uses_requested_route_shape_and_price_delta(self):
         tour = TourOption(
             country="Турция",
             resort="Лара",
@@ -142,6 +142,7 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
             nights=7,
             adults=2,
             children=0,
+            search_price=470_000,
             price=479_425,
             currency="RUB",
             room="Penthouse Suite",
@@ -167,10 +168,41 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
         self.assertIn("✈️ Москва → Анталья → Москва", text)
         self.assertIn("11 ноября: 05:40 → 10:15", text)
         self.assertIn("18 ноября: 12:30 → 17:05", text)
+        self.assertIn("💺 Перелёт: +9 425 ₽ к найденной цене", text)
         self.assertIn("🌙 7 ночей", text)
-        self.assertIn("💰 479 425 ₽", text)
+        self.assertIn("💰 Итоговая стоимость тура: 479 425 ₽", text)
         self.assertNotIn("💰 от 479 425 ₽", text)
         self.assertIn("Рейсы и стоимость актуализированы на момент поиска", text)
+
+    def test_compact_output_marks_flight_without_surcharge(self):
+        tour = TourOption(
+            country="Турция",
+            hotel="No Surcharge Hotel",
+            departure_city="Москва",
+            search_price=470_000,
+            price=470_000,
+            currency="RUB",
+            flight_actualized=True,
+            flight_included=True,
+            flight_is_direct=True,
+            flight_origin="Москва",
+            flight_destination="Анталья",
+            flight_forward_date="2026-11-11",
+            flight_forward_departure_time="05:40",
+            flight_forward_arrival_time="10:15",
+            flight_backward_date="2026-11-18",
+            flight_backward_departure_time="12:30",
+            flight_backward_arrival_time="17:05",
+        )
+
+        text = format_tours_compact_for_suvvy(
+            [tour],
+            self.request,
+            room_images_per_tour=0,
+        )
+
+        self.assertIn("💺 Перелёт: без доплаты к найденной цене", text)
+        self.assertIn("💰 Итоговая стоимость тура: 470 000 ₽", text)
 
     def test_unavailable_flight_does_not_replace_search_price(self):
         payload = self.flight_payload(price=490_000)
