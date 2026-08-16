@@ -329,6 +329,19 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _flight_runtime_ready_fields() -> dict[str, bool | int]:
+    """Expose only non-secret flight rollout settings for live diagnostics."""
+    return {
+        "flight_actualization_enabled": settings.tourvisor_enable_flight_actualization,
+        "flight_actualization_limit": settings.tourvisor_flight_actualization_limit,
+        "flight_actualization_concurrency": settings.tourvisor_flight_actualization_concurrency,
+        "flight_actualization_effective_concurrency": (
+            settings.effective_flight_actualization_concurrency
+        ),
+        "flight_timeout_seconds": settings.tourvisor_flight_timeout_seconds,
+    }
+
+
 @app.get("/ready", response_model=None)
 async def ready() -> dict[str, str | int | bool] | JSONResponse:
     guard_ready = search_guard is not None
@@ -350,6 +363,7 @@ async def ready() -> dict[str, str | int | bool] | JSONResponse:
                     "whitelist_version": operator_policy.version,
                     "whitelist_hash": operator_policy.short_hash,
                     "allowed_operator_count": operator_policy.active_count,
+                    **_flight_runtime_ready_fields(),
                     "search_guard_enabled": True,
                     "search_guard_ready": False,
                     "search_guard_persistence_verified": (
@@ -367,6 +381,7 @@ async def ready() -> dict[str, str | int | bool] | JSONResponse:
         "whitelist_version": operator_policy.version,
         "whitelist_hash": operator_policy.short_hash,
         "allowed_operator_count": operator_policy.active_count,
+        **_flight_runtime_ready_fields(),
         "search_guard_enabled": settings.search_guard_enabled,
         "search_guard_ready": guard_ready,
         "search_guard_persistence_verified": settings.search_guard_persistence_verified,
