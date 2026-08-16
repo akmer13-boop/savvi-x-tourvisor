@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_environment: str = "development"
-    service_version: str = "0.5.2"
+    service_version: str = "0.5.3"
     api_contract_version: str = "2026-07-21.2"
     git_commit_sha: str = "unknown"
 
@@ -137,7 +137,7 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "TOURVISOR_MAX_BUDGET_FALLBACK_CORRIDOR must be greater than or equal "
-                "to TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR"
+                "TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR"
             )
         if self.tourvisor_flight_actualization_limit <= 0:
             raise ValueError("TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT must be greater than zero")
