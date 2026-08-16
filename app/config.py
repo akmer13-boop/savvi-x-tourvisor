@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_environment: str = "development"
-    service_version: str = "0.5.0"
+    service_version: str = "0.5.1"
     api_contract_version: str = "2026-07-21.2"
     git_commit_sha: str = "unknown"
 
@@ -36,10 +36,12 @@ class Settings(BaseSettings):
 
     # Flight actualization. Tourvisor counts every /tours/{tourId}/flights call
     # as a billable/search-quota request, so this feature is opt-in and capped
-    # to the final client-facing cards only.
+    # to the final client-facing cards only. /flights can take noticeably longer
+    # than ordinary dictionary/search requests, therefore it has its own timeout.
     tourvisor_enable_flight_actualization: bool = False
     tourvisor_flight_actualization_limit: int = 3
-    tourvisor_flight_actualization_concurrency: int = 3
+    tourvisor_flight_actualization_concurrency: int = 1
+    tourvisor_flight_timeout_seconds: int = 45
 
     # Business filters and fail-closed operator policy.
     operator_registry_path: str = "config/operator_registry.json"
@@ -138,6 +140,8 @@ class Settings(BaseSettings):
                 "TOURVISOR_FLIGHT_ACTUALIZATION_CONCURRENCY must not exceed "
                 "TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT"
             )
+        if self.tourvisor_flight_timeout_seconds <= 0:
+            raise ValueError("TOURVISOR_FLIGHT_TIMEOUT_SECONDS must be greater than zero")
         if self.production_mode:
             if self.mock_tourvisor:
                 raise ValueError("MOCK_TOURVISOR must be false in production")
