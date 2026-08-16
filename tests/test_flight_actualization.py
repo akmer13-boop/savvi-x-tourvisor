@@ -2,6 +2,8 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from app.config import settings
 from app.formatting import format_tours_compact_for_suvvy
 from app.models import TourOption, TourSearchRequest
@@ -108,7 +110,8 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
             patch.object(settings, "mock_tourvisor", False),
             patch.object(settings, "tourvisor_enable_flight_actualization", True),
             patch.object(settings, "tourvisor_flight_actualization_limit", 3),
-            patch.object(settings, "tourvisor_flight_actualization_concurrency", 3),
+            patch.object(settings, "tourvisor_flight_actualization_concurrency", 1),
+            patch.object(settings, "tourvisor_flight_timeout_seconds", 45),
         ):
             result = asyncio.run(client.enrich_tours_with_flight_details([tour]))
 
@@ -129,6 +132,66 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
         client._get.assert_awaited_once()
         self.assertIn("/tours/12345/flights", client._get.await_args.args[1])
         self.assertEqual(client._get.await_args.kwargs["params"], {"currency": "RUB"})
+
+    def test_flight_actualization_uses_dedicated_timeout(self):
+        client = TourvisorClient(policy=self.policy)
+        tour = TourOption(
+            country="Турция",
+            hotel="Timeout Probe Hotel",
+            departure_city="Москва",
+            price=470_000,
+            currency="RUB",
+            tour_id="timeout-probe",
+        )
+
+        async def fake_get(http_client, path, params=None):
+            self.assertEqual(http_client.timeout.read, 45.0)
+            self.assertIn("/tours/timeout-probe/flights", path)
+            self.assertEqual(params, {"currency": "RUB"})
+            return self.flight_payload()
+
+        client._get = AsyncMock(side_effect=fake_get)
+
+        with (
+            patch.object(settings, "mock_tourvisor", False),
+            patch.object(settings, "tourvisor_enable_flight_actualization", True),
+            patch.object(settings, "tourvisor_flight_actualization_limit", 3),
+            patch.object(settings, "tourvisor_flight_actualization_concurrency", 1),
+            patch.object(settings, "tourvisor_flight_timeout_seconds", 45),
+        ):
+            asyncio.run(client.enrich_tours_with_flight_details([tour]))
+
+        self.assertTrue(tour.flight_actualized)
+
+    def test_read_timeout_is_logged_and_keeps_search_price(self):
+        client = TourvisorClient(policy=self.policy)
+        client._get = AsyncMock(side_effect=httpx.ReadTimeout("slow /flights response"))
+        tour = TourOption(
+            country="Турция",
+            hotel="Slow Flight Hotel",
+            departure_city="Москва",
+            price=470_000,
+            currency="RUB",
+            tour_id="slow-flight",
+        )
+
+        with (
+            patch.object(settings, "mock_tourvisor", False),
+            patch.object(settings, "tourvisor_enable_flight_actualization", True),
+            patch.object(settings, "tourvisor_flight_actualization_limit", 3),
+            patch.object(settings, "tourvisor_flight_actualization_concurrency", 1),
+            patch.object(settings, "tourvisor_flight_timeout_seconds", 45),
+            self.assertLogs("app.tourvisor_client", level="WARNING") as captured,
+        ):
+            asyncio.run(client.enrich_tours_with_flight_details([tour]))
+
+        self.assertFalse(tour.flight_actualized)
+        self.assertEqual(tour.price, 470_000)
+        self.assertIsNone(tour.search_price)
+        joined = "\n".join(captured.output)
+        self.assertIn("TOURVISOR_FLIGHT_REQUEST_TIMEOUT", joined)
+        self.assertIn("tour_id=slow-flight", joined)
+        self.assertIn("timeout_seconds=45", joined)
 
     def test_compact_output_uses_requested_route_shape_and_price_delta(self):
         tour = TourOption(
@@ -247,7 +310,8 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
             patch.object(settings, "mock_tourvisor", False),
             patch.object(settings, "tourvisor_enable_flight_actualization", True),
             patch.object(settings, "tourvisor_flight_actualization_limit", 3),
-            patch.object(settings, "tourvisor_flight_actualization_concurrency", 3),
+            patch.object(settings, "tourvisor_flight_actualization_concurrency", 1),
+            patch.object(settings, "tourvisor_flight_timeout_seconds", 45),
         ):
             asyncio.run(client.enrich_tours_with_flight_details(tours))
 

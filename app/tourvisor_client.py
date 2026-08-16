@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable
@@ -201,30 +202,61 @@ class TourvisorClient:
         semaphore = asyncio.Semaphore(
             max(settings.tourvisor_flight_actualization_concurrency, 1)
         )
+        flight_timeout = max(settings.tourvisor_flight_timeout_seconds, 1)
 
         async def fetch_one(
             client: httpx.AsyncClient,
             tour: TourOption,
         ) -> tuple[TourOption, Any | None]:
             async with semaphore:
+                started = time.perf_counter()
+                logger.info(
+                    "TOURVISOR_FLIGHT_REQUEST_STARTED request_id=%s tour_id=%s "
+                    "timeout_seconds=%s",
+                    get_request_id(),
+                    tour.tour_id,
+                    flight_timeout,
+                )
                 try:
                     payload = await self._get(
                         client,
                         f"/search/api/v1/tours/{tour.tour_id}/flights",
                         params={"currency": tour.currency or settings.tourvisor_currency},
                     )
-                    return tour, payload
+                except httpx.ReadTimeout:
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+                    logger.warning(
+                        "TOURVISOR_FLIGHT_REQUEST_TIMEOUT request_id=%s tour_id=%s "
+                        "elapsed_ms=%s timeout_seconds=%s",
+                        get_request_id(),
+                        tour.tour_id,
+                        elapsed_ms,
+                        flight_timeout,
+                    )
+                    return tour, None
                 except Exception as exc:  # noqa: BLE001 - enrichment must not break search
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
                     logger.warning(
                         "TOURVISOR_FLIGHT_ACTUALIZATION_FAILED request_id=%s "
-                        "tour_id=%s error_type=%s",
+                        "tour_id=%s error_type=%s elapsed_ms=%s",
                         get_request_id(),
                         tour.tour_id,
                         type(exc).__name__,
+                        elapsed_ms,
                     )
                     return tour, None
 
-        async with httpx.AsyncClient(timeout=settings.tourvisor_timeout_seconds) as client:
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                logger.info(
+                    "TOURVISOR_FLIGHT_REQUEST_SUCCESS request_id=%s tour_id=%s "
+                    "elapsed_ms=%s",
+                    get_request_id(),
+                    tour.tour_id,
+                    elapsed_ms,
+                )
+                return tour, payload
+
+        async with httpx.AsyncClient(timeout=flight_timeout) as client:
             payloads = await asyncio.gather(*(fetch_one(client, tour) for tour in candidates))
 
         for tour, payload in payloads:
