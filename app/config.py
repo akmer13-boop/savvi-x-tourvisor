@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_environment: str = "development"
-    service_version: str = "0.5.1"
+    service_version: str = "0.5.2"
     api_contract_version: str = "2026-07-21.2"
     git_commit_sha: str = "unknown"
 
@@ -105,6 +105,14 @@ class Settings(BaseSettings):
     def production_mode(self) -> bool:
         return self.app_environment.strip().lower() == "production"
 
+    @property
+    def effective_flight_actualization_concurrency(self) -> int:
+        """Concurrency that can actually be used after applying the billable-call limit."""
+        return min(
+            max(self.tourvisor_flight_actualization_concurrency, 1),
+            max(self.tourvisor_flight_actualization_limit, 1),
+        )
+
     def validate_runtime_configuration(self, active_operator_count: int) -> None:
         """Fail before serving traffic when a real integration is unsafe."""
         try:
@@ -135,11 +143,10 @@ class Settings(BaseSettings):
             raise ValueError("TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT must be greater than zero")
         if self.tourvisor_flight_actualization_concurrency <= 0:
             raise ValueError("TOURVISOR_FLIGHT_ACTUALIZATION_CONCURRENCY must be greater than zero")
-        if self.tourvisor_flight_actualization_concurrency > self.tourvisor_flight_actualization_limit:
-            raise ValueError(
-                "TOURVISOR_FLIGHT_ACTUALIZATION_CONCURRENCY must not exceed "
-                "TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT"
-            )
+        # Do not fail startup when an orchestration platform still exposes a stale
+        # concurrency value larger than the billable-call limit. The candidate list
+        # is capped by TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT, so effective concurrency
+        # is safely bounded by effective_flight_actualization_concurrency.
         if self.tourvisor_flight_timeout_seconds <= 0:
             raise ValueError("TOURVISOR_FLIGHT_TIMEOUT_SECONDS must be greater than zero")
         if self.production_mode:

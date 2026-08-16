@@ -130,6 +130,26 @@ class RuntimeConfigurationV05Test(unittest.TestCase):
         )
         valid.validate_runtime_configuration(active_operator_count=15)
 
+    def test_flight_concurrency_above_limit_does_not_block_startup(self):
+        configured = self._real_settings(
+            tourvisor_flight_actualization_limit=1,
+            tourvisor_flight_actualization_concurrency=3,
+            tourvisor_flight_timeout_seconds=45,
+        )
+        configured.validate_runtime_configuration(active_operator_count=15)
+        self.assertEqual(configured.effective_flight_actualization_concurrency, 1)
+
+    def test_invalid_flight_runtime_values_are_rejected(self):
+        for update, expected in (
+            ({"tourvisor_flight_actualization_limit": 0}, "TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT"),
+            ({"tourvisor_flight_actualization_concurrency": 0}, "TOURVISOR_FLIGHT_ACTUALIZATION_CONCURRENCY"),
+            ({"tourvisor_flight_timeout_seconds": 0}, "TOURVISOR_FLIGHT_TIMEOUT_SECONDS"),
+        ):
+            with self.subTest(update=update):
+                configured = self._real_settings(**update)
+                with self.assertRaisesRegex(ValueError, expected):
+                    configured.validate_runtime_configuration(active_operator_count=15)
+
     def test_guard_requires_explicit_persistence_restart_acknowledgement(self):
         configured = self._real_settings(
             search_guard_enabled=True,
