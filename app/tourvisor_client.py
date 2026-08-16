@@ -189,75 +189,103 @@ class TourvisorClient:
         source of flight variants and the current/final tour price. Every call
         consumes the Tourvisor daily search quota, therefore only the first
         explicitly configured client-facing tours are actualized.
+
+        Deep diagnostic mode is deliberately harder-capped to one billable
+        /flights request. Before spending that request it validates the tour ID
+        through GET /tours/{tourId}, which Tourvisor documents as non-billable.
         """
         if settings.mock_tourvisor or not settings.tourvisor_enable_flight_actualization:
             return tours
 
-        candidates = [tour for tour in tours if tour.tour_id][
-            : max(settings.tourvisor_flight_actualization_limit, 0)
-        ]
+        diagnostic_mode = settings.tourvisor_flight_diagnostic_mode
+        configured_limit = max(settings.tourvisor_flight_actualization_limit, 0)
+        effective_limit = min(configured_limit, 1) if diagnostic_mode else configured_limit
+        candidates = [tour for tour in tours if tour.tour_id][:effective_limit]
         if not candidates:
             return tours
 
-        semaphore = asyncio.Semaphore(
-            max(settings.tourvisor_flight_actualization_concurrency, 1)
-        )
-        flight_timeout = max(settings.tourvisor_flight_timeout_seconds, 1)
+        if diagnostic_mode:
+            logger.info(
+                "TOURVISOR_FLIGHT_DIAGNOSTIC_MODE request_id=%s configured_limit=%s "
+                "effective_limit=%s connect_timeout_seconds=%s read_timeout_seconds=%s",
+                get_request_id(),
+                configured_limit,
+                effective_limit,
+                settings.tourvisor_flight_diagnostic_connect_timeout_seconds,
+                settings.tourvisor_flight_diagnostic_read_timeout_seconds,
+            )
+
+        semaphore = asyncio.Semaphore(settings.effective_flight_actualization_concurrency)
+        read_timeout = settings.effective_flight_read_timeout_seconds
+        if diagnostic_mode:
+            connect_timeout = max(
+                settings.tourvisor_flight_diagnostic_connect_timeout_seconds,
+                1,
+            )
+            flight_timeout = httpx.Timeout(
+                connect=float(connect_timeout),
+                read=float(read_timeout),
+                write=float(connect_timeout),
+                pool=float(connect_timeout),
+            )
+        else:
+            connect_timeout = read_timeout
+            flight_timeout = httpx.Timeout(float(read_timeout))
 
         async def fetch_one(
             client: httpx.AsyncClient,
             tour: TourOption,
         ) -> tuple[TourOption, Any | None]:
             async with semaphore:
-                started = time.perf_counter()
-                logger.info(
-                    "TOURVISOR_FLIGHT_REQUEST_STARTED request_id=%s tour_id=%s "
-                    "timeout_seconds=%s",
-                    get_request_id(),
-                    tour.tour_id,
-                    flight_timeout,
-                )
-                try:
-                    payload = await self._get(
-                        client,
-                        f"/search/api/v1/tours/{tour.tour_id}/flights",
-                        params={"currency": tour.currency or settings.tourvisor_currency},
-                    )
-                except httpx.ReadTimeout:
-                    elapsed_ms = int((time.perf_counter() - started) * 1000)
-                    logger.warning(
-                        "TOURVISOR_FLIGHT_REQUEST_TIMEOUT request_id=%s tour_id=%s "
-                        "elapsed_ms=%s timeout_seconds=%s",
-                        get_request_id(),
-                        tour.tour_id,
-                        elapsed_ms,
-                        flight_timeout,
-                    )
-                    return tour, None
-                except Exception as exc:  # noqa: BLE001 - enrichment must not break search
-                    elapsed_ms = int((time.perf_counter() - started) * 1000)
-                    logger.warning(
-                        "TOURVISOR_FLIGHT_ACTUALIZATION_FAILED request_id=%s "
-                        "tour_id=%s error_type=%s elapsed_ms=%s",
-                        get_request_id(),
-                        tour.tour_id,
-                        type(exc).__name__,
-                        elapsed_ms,
-                    )
-                    return tour, None
+                currency = tour.currency or settings.tourvisor_currency
+                if diagnostic_mode:
+                    preflight_started = time.perf_counter()
+                    try:
+                        async with httpx.AsyncClient(
+                            timeout=settings.tourvisor_timeout_seconds
+                        ) as preflight_client:
+                            await self._get(
+                                preflight_client,
+                                f"/search/api/v1/tours/{tour.tour_id}",
+                                params={"currency": currency},
+                            )
+                    except Exception as exc:  # noqa: BLE001 - diagnostic must fail open
+                        elapsed_ms = int(
+                            (time.perf_counter() - preflight_started) * 1000
+                        )
+                        logger.warning(
+                            "TOURVISOR_TOUR_PREFLIGHT_FAILED request_id=%s tour_id=%s "
+                            "error_type=%s elapsed_ms=%s",
+                            get_request_id(),
+                            tour.tour_id,
+                            type(exc).__name__,
+                            elapsed_ms,
+                        )
+                        return tour, None
 
-                elapsed_ms = int((time.perf_counter() - started) * 1000)
-                logger.info(
-                    "TOURVISOR_FLIGHT_REQUEST_SUCCESS request_id=%s tour_id=%s "
-                    "elapsed_ms=%s",
-                    get_request_id(),
-                    tour.tour_id,
-                    elapsed_ms,
+                    elapsed_ms = int((time.perf_counter() - preflight_started) * 1000)
+                    logger.info(
+                        "TOURVISOR_TOUR_PREFLIGHT_SUCCESS request_id=%s tour_id=%s "
+                        "elapsed_ms=%s",
+                        get_request_id(),
+                        tour.tour_id,
+                        elapsed_ms,
+                    )
+
+                payload = await self._get_flight_payload(
+                    client,
+                    tour_id=str(tour.tour_id),
+                    currency=currency,
+                    diagnostic_mode=diagnostic_mode,
+                    connect_timeout_seconds=connect_timeout,
+                    read_timeout_seconds=read_timeout,
                 )
                 return tour, payload
 
         async with httpx.AsyncClient(timeout=flight_timeout) as client:
-            payloads = await asyncio.gather(*(fetch_one(client, tour) for tour in candidates))
+            payloads = await asyncio.gather(
+                *(fetch_one(client, tour) for tour in candidates)
+            )
 
         for tour, payload in payloads:
             if not _apply_flight_actualization(tour, payload):
@@ -273,6 +301,118 @@ class TourvisorClient:
                 tour.flight_is_direct,
             )
         return tours
+
+    async def _get_flight_payload(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        tour_id: str,
+        currency: str,
+        diagnostic_mode: bool,
+        connect_timeout_seconds: int,
+        read_timeout_seconds: int,
+    ) -> Any | None:
+        """Fetch one billable /flights payload with safe phase diagnostics."""
+        path = f"/search/api/v1/tours/{tour_id}/flights"
+        params = {"currency": currency}
+        started = time.perf_counter()
+        headers_received = False
+        logger.info(
+            "TOURVISOR_FLIGHT_REQUEST_STARTED request_id=%s tour_id=%s "
+            "diagnostic=%s connect_timeout_seconds=%s read_timeout_seconds=%s "
+            "timeout_seconds=%s",
+            get_request_id(),
+            tour_id,
+            diagnostic_mode,
+            connect_timeout_seconds,
+            read_timeout_seconds,
+            read_timeout_seconds,
+        )
+
+        try:
+            if diagnostic_mode:
+                url = f"{self.base_url}{path}"
+                async with client.stream(
+                    "GET",
+                    url,
+                    params=self._clean_params(params),
+                    headers=self.headers,
+                ) as response:
+                    headers_received = True
+                    logger.info(
+                        "TOURVISOR_FLIGHT_RESPONSE_HEADERS request_id=%s tour_id=%s "
+                        "status=%s content_type=%s content_length=%s "
+                        "transfer_encoding=%s",
+                        get_request_id(),
+                        tour_id,
+                        response.status_code,
+                        response.headers.get("content-type") or "none",
+                        response.headers.get("content-length") or "none",
+                        response.headers.get("transfer-encoding") or "none",
+                    )
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        logger.error(
+                            "Tourvisor API error request_id=%s status=%s path=%s",
+                            get_request_id(),
+                            exc.response.status_code,
+                            path,
+                        )
+                        raise RuntimeError(
+                            f"Tourvisor API error {exc.response.status_code}"
+                        ) from exc
+                    await response.aread()
+                    payload = response.json()
+            else:
+                payload = await self._get(client, path, params=params)
+        except httpx.ConnectTimeout:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                "TOURVISOR_FLIGHT_CONNECT_TIMEOUT request_id=%s tour_id=%s "
+                "elapsed_ms=%s connect_timeout_seconds=%s",
+                get_request_id(),
+                tour_id,
+                elapsed_ms,
+                connect_timeout_seconds,
+            )
+            return None
+        except httpx.ReadTimeout:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                "TOURVISOR_FLIGHT_REQUEST_TIMEOUT request_id=%s tour_id=%s "
+                "elapsed_ms=%s timeout_seconds=%s phase=%s diagnostic=%s",
+                get_request_id(),
+                tour_id,
+                elapsed_ms,
+                read_timeout_seconds,
+                "body" if headers_received else "headers",
+                diagnostic_mode,
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001 - enrichment must not break search
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                "TOURVISOR_FLIGHT_ACTUALIZATION_FAILED request_id=%s "
+                "tour_id=%s error_type=%s elapsed_ms=%s headers_received=%s",
+                get_request_id(),
+                tour_id,
+                type(exc).__name__,
+                elapsed_ms,
+                headers_received,
+            )
+            return None
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "TOURVISOR_FLIGHT_REQUEST_SUCCESS request_id=%s tour_id=%s "
+            "elapsed_ms=%s diagnostic=%s",
+            get_request_id(),
+            tour_id,
+            elapsed_ms,
+            diagnostic_mode,
+        )
+        return payload
 
     async def enrich_tours_with_hotel_details(self, tours: list[TourOption]) -> list[TourOption]:
         """Actualize flights, then attach the official Tourvisor hotel cover image.
@@ -351,6 +491,8 @@ class TourvisorClient:
         room_by_id = {_to_int(room.get("id")): room for room in rooms if isinstance(room, dict)}
         image_limit = max(settings.tourvisor_room_images_limit, 0)
         for tour in tours:
+            if not tour.room_id:
+                continue
             room = room_by_id.get(tour.room_id)
             if not room:
                 continue
@@ -497,7 +639,6 @@ class TourvisorClient:
             "hotelRating": 4,
             "meal": meal_id,
         }
-
         if self.operator_policy.enforced:
             if not self.operator_policy.active_ids:
                 raise OperatorPolicyConfigurationError(
