@@ -138,6 +138,30 @@ def _flight_lines(tour: TourOption) -> list[str]:
     return lines
 
 
+def _flight_price_line(tour: TourOption) -> str | None:
+    """Describe the price effect of flight actualization without inventing airfare.
+
+    Tourvisor's /flights response exposes the final price of the package for the
+    selected flight option, not a standalone airline ticket fare. Therefore the
+    client-facing value is the delta versus the price found by the tour search.
+    """
+    if not tour.flight_actualized or tour.flight_included is False:
+        return None
+    if tour.search_price is None or tour.price is None:
+        return "💺 Перелёт: включён в стоимость тура"
+
+    delta = tour.price - tour.search_price
+    if delta == 0:
+        return "💺 Перелёт: без доплаты к найденной цене"
+
+    delta_text = _money(abs(delta), tour.currency)
+    if not delta_text:
+        return None
+    if delta > 0:
+        return f"💺 Перелёт: +{delta_text} к найденной цене"
+    return f"💺 Перелёт: цена после актуализации ниже на {delta_text}"
+
+
 def _availability_footer(tours: list[TourOption]) -> str:
     actualized = sum(1 for tour in tours if tour.flight_actualized)
     if tours and actualized == len(tours):
@@ -167,6 +191,9 @@ def format_tour_card_text(tour: TourOption, request: TourSearchRequest, index: i
     flight_lines = _flight_lines(tour)
     if flight_lines:
         lines.extend(flight_lines)
+        flight_price_line = _flight_price_line(tour)
+        if flight_price_line:
+            lines.append(flight_price_line)
     else:
         fly_date = _format_date_ru(tour.fly_date)
         if fly_date:
@@ -194,7 +221,7 @@ def format_tour_card_text(tour: TourOption, request: TourSearchRequest, index: i
     price = _money(tour.price, tour.currency)
     if price:
         if tour.flight_actualized:
-            lines.append(f"💰 Стоимость: {price}")
+            lines.append(f"💰 Итоговая стоимость тура: {price}")
         else:
             lines.append(f"💰 Стоимость: от {price}")
     if tour.link:
@@ -306,6 +333,9 @@ def format_tours_compact_for_suvvy(
         flight_lines = _flight_lines(tour)
         if flight_lines:
             lines.extend(flight_lines)
+            flight_price_line = _flight_price_line(tour)
+            if flight_price_line:
+                lines.append(flight_price_line)
             if tour.nights:
                 lines.append(f"🌙 {tour.nights} {_night_word(tour.nights)}")
         else:
@@ -335,7 +365,7 @@ def format_tours_compact_for_suvvy(
         price = _money(tour.price, tour.currency)
         if price:
             if tour.flight_actualized:
-                lines.append(f"💰 {price}")
+                lines.append(f"💰 Итоговая стоимость тура: {price}")
             else:
                 lines.append(f"💰 от {price}")
 
