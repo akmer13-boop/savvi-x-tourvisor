@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     tourvisor_max_budget_primary_corridor: int = 25_000
     tourvisor_max_budget_fallback_corridor: int = 100_000
 
+    # Flight actualization. Tourvisor counts every /tours/{tourId}/flights call
+    # as a billable/search-quota request, so this feature is opt-in and capped
+    # to the final client-facing cards only.
+    tourvisor_enable_flight_actualization: bool = False
+    tourvisor_flight_actualization_limit: int = 3
+    tourvisor_flight_actualization_concurrency: int = 3
+
     # Business filters and fail-closed operator policy.
     operator_registry_path: str = "config/operator_registry.json"
     tourvisor_min_hotel_rating: float = 4.0
@@ -121,6 +128,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "TOURVISOR_MAX_BUDGET_FALLBACK_CORRIDOR must be greater than or equal "
                 "to TOURVISOR_MAX_BUDGET_PRIMARY_CORRIDOR"
+            )
+        if self.tourvisor_flight_actualization_limit <= 0:
+            raise ValueError("TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT must be greater than zero")
+        if self.tourvisor_flight_actualization_concurrency <= 0:
+            raise ValueError("TOURVISOR_FLIGHT_ACTUALIZATION_CONCURRENCY must be greater than zero")
+        if self.tourvisor_flight_actualization_concurrency > self.tourvisor_flight_actualization_limit:
+            raise ValueError(
+                "TOURVISOR_FLIGHT_ACTUALIZATION_CONCURRENCY must not exceed "
+                "TOURVISOR_FLIGHT_ACTUALIZATION_LIMIT"
             )
         if self.production_mode:
             if self.mock_tourvisor:
