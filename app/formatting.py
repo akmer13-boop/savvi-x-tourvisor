@@ -162,6 +162,16 @@ def _flight_price_line(tour: TourOption) -> str | None:
     return f"💺 Перелёт: цена после актуализации ниже на {delta_text}"
 
 
+def _flight_price_disclaimer(tour: TourOption) -> str | None:
+    """Clarify non-actualized search prices without claiming they are hotel-only."""
+    if tour.flight_actualized:
+        return None
+    return (
+        "ℹ️ Цена без актуализации перелёта. "
+        "Наличие рейса и итоговую стоимость тура подтвердит менеджер."
+    )
+
+
 def _availability_footer(tours: list[TourOption]) -> str:
     actualized = sum(1 for tour in tours if tour.flight_actualized)
     if tours and actualized == len(tours):
@@ -224,6 +234,9 @@ def format_tour_card_text(tour: TourOption, request: TourSearchRequest, index: i
             lines.append(f"💰 Итоговая стоимость тура: {price}")
         else:
             lines.append(f"💰 Стоимость: от {price}")
+            disclaimer = _flight_price_disclaimer(tour)
+            if disclaimer:
+                lines.append(disclaimer)
     if tour.link:
         lines.append(f"🔗 Подробнее: {tour.link}")
 
@@ -368,6 +381,9 @@ def format_tours_compact_for_suvvy(
                 lines.append(f"💰 Итоговая стоимость тура: {price}")
             else:
                 lines.append(f"💰 от {price}")
+                disclaimer = _flight_price_disclaimer(tour)
+                if disclaimer:
+                    lines.append(disclaimer)
 
         main_images, room_images = _group_images(
             tour,
