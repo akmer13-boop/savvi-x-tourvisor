@@ -139,27 +139,16 @@ def _flight_lines(tour: TourOption) -> list[str]:
 
 
 def _flight_price_line(tour: TourOption) -> str | None:
-    """Describe the price effect of flight actualization without inventing airfare.
+    """State flight inclusion without exposing a misleading package-price delta.
 
-    Tourvisor's /flights response exposes the final price of the package for the
-    selected flight option, not a standalone airline ticket fare. Therefore the
-    client-facing value is the delta versus the price found by the tour search.
+    Tourvisor's /flights response exposes the final price of the whole tour
+    package for the selected flight option, not a standalone airline ticket
+    fare. The client therefore sees the useful business fact: the flight is
+    included in the displayed final tour price.
     """
     if not tour.flight_actualized or tour.flight_included is False:
         return None
-    if tour.search_price is None or tour.price is None:
-        return "💺 Перелёт: включён в стоимость тура"
-
-    delta = tour.price - tour.search_price
-    if delta == 0:
-        return "💺 Перелёт: без доплаты к найденной цене"
-
-    delta_text = _money(abs(delta), tour.currency)
-    if not delta_text:
-        return None
-    if delta > 0:
-        return f"💺 Перелёт: +{delta_text} к найденной цене"
-    return f"💺 Перелёт: цена после актуализации ниже на {delta_text}"
+    return "💺 Перелёт включён в стоимость тура"
 
 
 def _flight_price_disclaimer(tour: TourOption) -> str | None:
