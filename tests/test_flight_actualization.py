@@ -193,7 +193,7 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
         self.assertIn("tour_id=slow-flight", joined)
         self.assertIn("timeout_seconds=45", joined)
 
-    def test_compact_output_uses_requested_route_shape_and_price_delta(self):
+    def test_compact_output_uses_requested_route_shape_and_friendly_flight_copy(self):
         tour = TourOption(
             country="Турция",
             resort="Лара",
@@ -231,13 +231,14 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
         self.assertIn("✈️ Москва → Анталья → Москва", text)
         self.assertIn("11 ноября: 05:40 → 10:15", text)
         self.assertIn("18 ноября: 12:30 → 17:05", text)
-        self.assertIn("💺 Перелёт: +9 425 ₽ к найденной цене", text)
+        self.assertIn("💺 Перелёт включён в стоимость тура", text)
+        self.assertNotIn("+9 425 ₽ к найденной цене", text)
         self.assertIn("🌙 7 ночей", text)
         self.assertIn("💰 Итоговая стоимость тура: 479 425 ₽", text)
         self.assertNotIn("💰 от 479 425 ₽", text)
         self.assertIn("Рейсы и стоимость актуализированы на момент поиска", text)
 
-    def test_compact_output_marks_flight_without_surcharge(self):
+    def test_compact_output_marks_flight_as_included_without_delta_copy(self):
         tour = TourOption(
             country="Турция",
             hotel="No Surcharge Hotel",
@@ -264,7 +265,8 @@ class TourvisorFlightActualizationTest(unittest.TestCase):
             room_images_per_tour=0,
         )
 
-        self.assertIn("💺 Перелёт: без доплаты к найденной цене", text)
+        self.assertIn("💺 Перелёт включён в стоимость тура", text)
+        self.assertNotIn("без доплаты к найденной цене", text)
         self.assertIn("💰 Итоговая стоимость тура: 470 000 ₽", text)
 
     def test_unavailable_flight_does_not_replace_search_price(self):
