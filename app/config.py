@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_environment: str = "development"
-    service_version: str = "0.5.6"
+    service_version: str = "0.5.7"
     api_contract_version: str = "2026-07-21.2"
     git_commit_sha: str = "unknown"
 
