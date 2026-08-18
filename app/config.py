@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     )
 
     app_environment: str = "development"
-    service_version: str = "0.5.5"
+    service_version: str = "0.5.6"
     api_contract_version: str = "2026-07-21.2"
     git_commit_sha: str = "unknown"
 
@@ -34,14 +34,14 @@ class Settings(BaseSettings):
     tourvisor_max_budget_primary_corridor: int = 25_000
     tourvisor_max_budget_fallback_corridor: int = 100_000
 
-    # Flight actualization. Tourvisor counts every /tours/{tourId}/flights call
-    # as a billable/search-quota request, so this feature is opt-in and capped
-    # to the final client-facing cards only. /flights can take noticeably longer
-    # than ordinary dictionary/search requests, therefore it has its own timeout.
+    # Flight actualization. The feature remains opt-in, but when enabled the
+    # three client-facing cards are actualized in parallel. Each card fails open:
+    # a timeout/error preserves the search price and is rendered with the
+    # per-card flight disclaimer instead of breaking the whole response.
     tourvisor_enable_flight_actualization: bool = False
     tourvisor_flight_actualization_limit: int = 3
-    tourvisor_flight_actualization_concurrency: int = 1
-    tourvisor_flight_timeout_seconds: int = 45
+    tourvisor_flight_actualization_concurrency: int = 3
+    tourvisor_flight_timeout_seconds: int = 60
 
     # Controlled deep diagnostics for the slow /flights endpoint. When enabled,
     # the bridge first validates the selected tour through the non-billable
